@@ -177,20 +177,11 @@ async fn run(
                     (State::Loaded(_), KeyCode::Char('o'), _) => {
                         app.active_tab = 0;
                     }
-                    (State::Loaded(_), KeyCode::Char('v'), _) => {
+                    (State::Loaded(_), KeyCode::Char('f'), _) => {
                         app.active_tab = 1;
                     }
-                    (State::Loaded(_), KeyCode::Char('d'), _) => {
-                        app.active_tab = 2;
-                    }
-                    (State::Loaded(_), KeyCode::Char('e'), _) => {
-                        app.active_tab = 3;
-                    }
-                    (State::Loaded(_), KeyCode::Char('p'), _) => {
-                        app.active_tab = 4;
-                    }
-                    (State::Loaded(_), KeyCode::Char('g'), _) => {
-                        app.active_tab = 5;
+                    (State::Loaded(_), KeyCode::Char('v' | 'd' | 'e' | 'p' | 'g'), _) => {
+                        app.active_tab = 1;
                     }
 
                     _ => {}

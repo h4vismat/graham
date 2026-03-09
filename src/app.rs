@@ -2,11 +2,7 @@ use crate::models::StockIndicators;
 
 pub const TABS: &[&str] = &[
     "Overview",
-    "Valuation",
-    "Debt",
-    "Efficiency",
-    "Profitability",
-    "Growth",
+    "Financials",
     "News",
 ];
 

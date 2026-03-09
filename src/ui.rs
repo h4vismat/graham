@@ -72,13 +72,13 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         (State::Input, _) => " Enter ticker and press ↵  |  Ctrl+C quit",
         (State::Loading(_), _) => " Loading…  |  Ctrl+C quit",
         (State::Loaded(_), _) if is_news => {
-            " ↑ ↓  select  |  Enter open  |  r refresh  |  o v d e p g n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+            " ↑ ↓  select  |  Enter open  |  r refresh  |  o f n  jump tab  |  q / Esc back  |  Ctrl+C quit"
         }
         (State::Loaded(_), 0) => {
-            " o v d e p g n  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
+            " o f n  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
         }
         (State::Loaded(_), _) => {
-            " o v d e p g n  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
+            " o f n  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
         }
         (State::Error { .. }, _) => " q / Esc back to search  |  Ctrl+C quit",
     };
@@ -283,12 +283,8 @@ fn render_loaded(
     // Tab content
     match active_tab {
         0 => render_overview(f, chunks[1], data, active_period, ai_state, tick),
-        1 => render_indicator_table(f, chunks[1], "Valuation", &valuation_rows(data)),
-        2 => render_indicator_table(f, chunks[1], "Debt", &debt_rows(data)),
-        3 => render_indicator_table(f, chunks[1], "Efficiency", &efficiency_rows(data)),
-        4 => render_indicator_table(f, chunks[1], "Profitability", &profitability_rows(data)),
-        5 => render_indicator_table(f, chunks[1], "Growth", &growth_rows(data)),
-        6 => render_news(f, chunks[1], data, news_selected),
+        1 => render_financials(f, chunks[1], data),
+        2 => render_news(f, chunks[1], data, news_selected),
         _ => {}
     }
 }
@@ -379,6 +375,35 @@ fn render_overview(
 
     // ── Bottom: AI analysis panel ──
     render_ai_analysis(f, rows[2], ai_state, tick);
+}
+
+// ─── Financials tab ──────────────────────────────────────────────────────────
+
+fn render_financials(f: &mut Frame, area: Rect, data: &StockIndicators) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+    render_indicator_table(f, top[0], "Valuation", &valuation_rows(data));
+    render_indicator_table(f, top[1], "Debt", &debt_rows(data));
+
+    let middle = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+    render_indicator_table(f, middle[0], "Efficiency", &efficiency_rows(data));
+    render_indicator_table(f, middle[1], "Profitability", &profitability_rows(data));
+
+    render_indicator_table(f, rows[2], "Growth", &growth_rows(data));
 }
 
 // ─── News tab ────────────────────────────────────────────────────────────────
