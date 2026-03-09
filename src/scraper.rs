@@ -385,3 +385,40 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
         profile,
     })
 }
+
+pub async fn fetch_current_price(
+    ticker: &str,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    let market = Market::detect(ticker);
+    let client = Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+             AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/121.0.0.0 Safari/537.36",
+        )
+        .build()?;
+
+    let page_url = format!("https://statusinvest.com.br/{}", market.page_path(ticker));
+    let html_text = client
+        .get(&page_url)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "pt-BR,pt;q=0.9")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let html = Html::parse_document(&html_text);
+    let price_text = select_text(&html, "div.info.special strong.value").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "Price not found")
+    })?;
+    let current_price = parse_br_number(&price_text);
+    if current_price <= 0.0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Price invalid").into());
+    }
+
+    Ok(current_price)
+}

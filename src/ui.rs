@@ -6,11 +6,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState,
-        Paragraph, Row, Table, Tabs, Wrap,
+        Paragraph, Row, Table, TableState, Tabs, Wrap,
     },
 };
 
-use crate::app::{AiState, App, PERIODS, State, TABS};
+use crate::app::{
+    AiState, App, MenuMode, PositionForm, PositionsMode, Screen, StockState, PERIODS, TABS,
+};
 use crate::models::{IndicatorData, StockIndicators};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -46,11 +48,15 @@ pub fn render(f: &mut Frame, app: &App) {
 // ─── Title bar ────────────────────────────────────────────────────────────────
 
 fn render_title_bar(f: &mut Frame, area: Rect, app: &App) {
-    let ticker_label = match &app.state {
-        State::Loaded(data) => format!(" · {}", data.ticker),
-        State::Loading(t) => format!(" · {t}"),
-        State::Error { ticker, .. } => format!(" · {ticker}"),
-        State::Input => String::new(),
+    let suffix = match app.screen {
+        Screen::Menu => " · Menu".to_string(),
+        Screen::Positions => " · Positions".to_string(),
+        Screen::Stock => match &app.stock.state {
+            StockState::Loaded(data) => format!(" · {}", data.ticker),
+            StockState::Loading(t) => format!(" · {t}"),
+            StockState::Error { ticker, .. } => format!(" · {ticker}"),
+            StockState::Input => " · Stock".to_string(),
+        },
     };
 
     let title = Line::from(vec![
@@ -58,7 +64,7 @@ fn render_title_bar(f: &mut Frame, area: Rect, app: &App) {
             " Graham",
             Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(ticker_label, Style::default().fg(C_DIM)),
+        Span::styled(suffix, Style::default().fg(C_DIM)),
     ]);
 
     f.render_widget(Paragraph::new(title), area);
@@ -67,20 +73,41 @@ fn render_title_bar(f: &mut Frame, area: Rect, app: &App) {
 // ─── Status bar ───────────────────────────────────────────────────────────────
 
 fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let is_news = app.active_tab + 1 == TABS.len();
-    let hint = match (&app.state, app.active_tab) {
-        (State::Input, _) => " Enter ticker and press ↵  |  Ctrl+C quit",
-        (State::Loading(_), _) => " Loading…  |  Ctrl+C quit",
-        (State::Loaded(_), _) if is_news => {
-            " ↑ ↓  select  |  Enter open  |  r refresh  |  o f n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+    let hint = match app.screen {
+        Screen::Menu => match app.menu_mode {
+            MenuMode::Idle => " p positions  |  s stock  |  q quit  |  Ctrl+C quit",
+            MenuMode::StockInput => " Type ticker  |  Enter search  |  Esc cancel  |  Ctrl+C quit",
+        },
+        Screen::Positions => match &app.positions.mode {
+            PositionsMode::View => {
+                " j/k or ↑↓ move  |  Enter open  |  a add  |  e edit  |  d delete  |  r refresh  |  Esc menu  |  Ctrl+C quit"
+            }
+            PositionsMode::Add(_) | PositionsMode::Edit(_) => {
+                " Enter next/save  |  Tab next  |  Shift+Tab prev  |  Esc cancel  |  Ctrl+C quit"
+            }
+            PositionsMode::DeleteConfirm { .. } => {
+                " y confirm delete  |  n / Esc cancel  |  Ctrl+C quit"
+            }
+        },
+        Screen::Stock => {
+            let is_news = app.stock.active_tab + 1 == TABS.len();
+            match (&app.stock.state, app.stock.active_tab) {
+                (StockState::Input, _) => " Enter ticker and press ↵  |  Esc menu  |  Ctrl+C quit",
+                (StockState::Loading(_), _) => " Loading…  |  Ctrl+C quit",
+                (StockState::Loaded(_), _) if is_news => {
+                    " ↑ ↓  select  |  Enter open  |  r refresh  |  o f n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                }
+                (StockState::Loaded(_), 0) => {
+                    " o f n  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
+                }
+                (StockState::Loaded(_), _) => {
+                    " o f n  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
+                }
+                (StockState::Error { .. }, _) => {
+                    " q / Esc back to search  |  Ctrl+C quit"
+                }
+            }
         }
-        (State::Loaded(_), 0) => {
-            " o f n  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
-        }
-        (State::Loaded(_), _) => {
-            " o f n  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
-        }
-        (State::Error { .. }, _) => " q / Esc back to search  |  Ctrl+C quit",
     };
 
     let (text, style) = match &app.status_message {
@@ -94,22 +121,26 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
 // ─── Content router ──────────────────────────────────────────────────────────
 
 fn render_content(f: &mut Frame, area: Rect, app: &App) {
-    match &app.state {
-        State::Input => render_input(f, area, app),
-        State::Loading(t) => render_loading(f, area, t, app.tick),
-        State::Loaded(data) => {
-            render_loaded(
-                f,
-                area,
-                data,
-                app.active_tab,
-                app.active_period,
-                &app.ai_state,
-                app.tick,
-                app.news_selected,
-            )
-        }
-        State::Error { ticker, message } => render_error(f, area, ticker, message),
+    match app.screen {
+        Screen::Menu => render_menu(f, area, app),
+        Screen::Positions => render_positions(f, area, app),
+        Screen::Stock => match &app.stock.state {
+            StockState::Input => render_stock_input(f, area, app),
+            StockState::Loading(t) => render_loading(f, area, t, app.tick),
+            StockState::Loaded(data) => {
+                render_loaded(
+                    f,
+                    area,
+                    data,
+                    app.stock.active_tab,
+                    app.stock.active_period,
+                    &app.stock.ai_state,
+                    app.tick,
+                    app.stock.news_selected,
+                )
+            }
+            StockState::Error { ticker, message } => render_error(f, area, ticker, message),
+        },
     }
 }
 
@@ -126,9 +157,106 @@ const TAGLINE: &[&str] = &[
     "10-year fundamental history · valuation · debt · efficiency",
 ];
 
-// ─── Input screen ────────────────────────────────────────────────────────────
+// ─── Menu screen ────────────────────────────────────────────────────────────
 
-fn render_input(f: &mut Frame, area: Rect, app: &App) {
+fn render_menu(f: &mut Frame, area: Rect, app: &App) {
+    // logo(5) + gap(1) + menu(4) = 10 rows
+    let vchunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),    // top padding
+            Constraint::Length(5), // logo
+            Constraint::Length(1), // gap
+            Constraint::Length(4), // menu
+            Constraint::Min(0),    // bottom padding
+        ])
+        .split(area);
+
+    // Logo — each line coloured cyan, bold
+    let logo_lines: Vec<Line> = LOGO
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                *l,
+                Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(logo_lines).alignment(Alignment::Center),
+        vchunks[1],
+    );
+
+    // Menu — horizontally centred
+    let hchunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+        ])
+        .split(vchunks[3]);
+
+    let menu_area = hchunks[1];
+    let label_width = 18usize;
+    let rows = vec![
+        ("[P] Positions", "p"),
+        ("[S] Stocks", "s"),
+    ];
+
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(label, key)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{label:<label_width$}"),
+                    Style::default().fg(C_LABEL),
+                ),
+                Span::styled(
+                    key,
+                    Style::default().fg(C_TAB).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        menu_area,
+    );
+
+    if matches!(app.menu_mode, MenuMode::StockInput) {
+        render_menu_stock_input(f, area, app);
+    }
+}
+
+fn render_menu_stock_input(f: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(50, 20, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_TAB))
+        .title(Span::styled(
+            " Stock Ticker ",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal_area);
+    f.render_widget(Clear, modal_area);
+    f.render_widget(block, modal_area);
+
+    let line = Line::from(vec![
+        Span::styled("Ticker: ", Style::default().fg(C_LABEL)),
+        Span::styled(
+            app.stock.input.clone(),
+            Style::default().fg(C_VALUE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(C_VALUE)),
+    ]);
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
+}
+
+// ─── Stock input screen ──────────────────────────────────────────────────────
+
+fn render_stock_input(f: &mut Frame, area: Rect, app: &App) {
     // logo(5) + gap(1) + tagline(2) + gap(1) + search box(3) = 12 rows
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
@@ -194,7 +322,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let prompt = Line::from(vec![
         Span::styled("Ticker: ", Style::default().fg(C_LABEL)),
         Span::styled(
-            app.input.clone(),
+            app.stock.input.clone(),
             Style::default().fg(C_VALUE).add_modifier(Modifier::BOLD),
         ),
         Span::styled("█", Style::default().fg(C_VALUE)),
@@ -244,6 +372,221 @@ fn render_error(f: &mut Frame, area: Rect, ticker: &str, message: &str) {
         .style(Style::default().fg(C_LABEL));
 
     f.render_widget(text, area);
+}
+
+// ─── Positions screen ─────────────────────────────────────────────────────────
+
+fn render_positions(f: &mut Frame, area: Rect, app: &App) {
+    let rows_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " Positions ",
+        Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+    ));
+
+    if app.positions.rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("No positions yet. Press 'a' to add.")
+                .block(block)
+                .style(Style::default().fg(C_DIM))
+                .alignment(Alignment::Center),
+            rows_area[0],
+        );
+    } else {
+        let header = Row::new(vec![
+            Cell::from("Ticker").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from("Shares").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from("Avg Cost").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from("Current").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from("P/L $").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from("P/L %").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+        ]);
+
+        let table_rows: Vec<Row> = app
+            .positions
+            .rows
+            .iter()
+            .map(|row| {
+                let current_text = row
+                    .current_price
+                    .map(fmt_price)
+                    .unwrap_or_else(|| "—".to_string());
+
+                let (pl_text, pl_pct_text, pl_color) = match row.current_price {
+                    Some(current) => {
+                        let pl = (current - row.avg_cost) * row.shares;
+                        let pl_pct = if row.avg_cost.abs() > f64::EPSILON {
+                            (current - row.avg_cost) / row.avg_cost * 100.0
+                        } else {
+                            0.0
+                        };
+                        let color = if pl >= 0.0 { C_POS } else { C_NEG };
+                        (fmt_money(pl), fmt_pct(pl_pct), color)
+                    }
+                    None => ("—".to_string(), "—".to_string(), C_DIM),
+                };
+
+                Row::new(vec![
+                    Cell::from(row.ticker.as_str()).style(Style::default().fg(C_LABEL)),
+                    Cell::from(fmt_qty(row.shares)).style(Style::default().fg(C_VALUE)),
+                    Cell::from(fmt_price(row.avg_cost)).style(Style::default().fg(C_VALUE)),
+                    Cell::from(current_text).style(Style::default().fg(C_VALUE)),
+                    Cell::from(pl_text).style(Style::default().fg(pl_color)),
+                    Cell::from(pl_pct_text).style(Style::default().fg(pl_color)),
+                ])
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(10),
+        ];
+
+        let mut state = TableState::default();
+        state.select(Some(app.positions.selected.min(app.positions.rows.len().saturating_sub(1))));
+
+        let table = Table::new(table_rows, widths)
+            .header(header)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .fg(C_TAB)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+
+        f.render_stateful_widget(table, rows_area[0], &mut state);
+    }
+
+    render_positions_summary(f, rows_area[1], app);
+
+    match &app.positions.mode {
+        PositionsMode::Add(form) => render_positions_form(f, area, "Add Position", form),
+        PositionsMode::Edit(form) => render_positions_form(f, area, "Edit Position", form),
+        PositionsMode::DeleteConfirm { ticker, .. } => render_delete_confirm(f, area, ticker),
+        PositionsMode::View => {}
+    }
+}
+
+fn render_positions_summary(f: &mut Frame, area: Rect, app: &App) {
+    if app.positions.rows.is_empty() {
+        f.render_widget(Paragraph::new("").style(Style::default().fg(C_DIM)), area);
+        return;
+    }
+
+    let mut total_cost = 0.0;
+    let mut total_value = 0.0;
+    let mut has_prices = false;
+
+    for row in &app.positions.rows {
+        total_cost += row.shares * row.avg_cost;
+        if let Some(current) = row.current_price {
+            total_value += row.shares * current;
+            has_prices = true;
+        }
+    }
+
+    let (summary, style) = if has_prices && total_cost.abs() > f64::EPSILON {
+        let total_pl = total_value - total_cost;
+        let total_pct = total_pl / total_cost * 100.0;
+        let color = if total_pl >= 0.0 { C_POS } else { C_NEG };
+        (
+            format!(
+                "Total P/L: {} ({})",
+                fmt_money(total_pl),
+                fmt_pct(total_pct)
+            ),
+            Style::default().fg(color),
+        )
+    } else {
+        ("Total P/L: —".to_string(), Style::default().fg(C_DIM))
+    };
+
+    f.render_widget(
+        Paragraph::new(summary)
+            .alignment(Alignment::Center)
+            .style(style),
+        area,
+    );
+}
+
+fn render_positions_form(f: &mut Frame, area: Rect, title: &str, form: &PositionForm) {
+    let modal_area = centered_rect(60, 40, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_TAB))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(Clear, modal_area);
+    f.render_widget(block, modal_area);
+
+    let fields = [
+        ("Ticker", form.ticker.as_str()),
+        ("Shares", form.shares.as_str()),
+        ("Avg Cost", form.avg_cost.as_str()),
+    ];
+
+    let lines: Vec<Line> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, value))| {
+            let is_active = idx == form.active_field;
+            let value_display = if is_active {
+                format!("{value}█")
+            } else {
+                value.to_string()
+            };
+            let label_style = if is_active {
+                Style::default().fg(C_TAB).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_DIM)
+            };
+            let value_style = if is_active {
+                Style::default().fg(C_VALUE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_LABEL)
+            };
+            Line::from(vec![
+                Span::styled(format!("{label:<10}"), label_style),
+                Span::styled(value_display, value_style),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
+}
+
+fn render_delete_confirm(f: &mut Frame, area: Rect, ticker: &str) {
+    let modal_area = centered_rect(50, 20, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_NEG))
+        .title(Span::styled(
+            " Delete Position ",
+            Style::default().fg(C_NEG).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal_area);
+    f.render_widget(Clear, modal_area);
+    f.render_widget(block, modal_area);
+
+    let text = format!("Delete position for {ticker}? (y/n)");
+    f.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(C_LABEL)),
+        inner,
+    );
 }
 
 // ─── Loaded screen ───────────────────────────────────────────────────────────
@@ -763,6 +1106,12 @@ fn fmt_pct(v: f64) -> String {
 fn fmt_price(v: f64) -> String {
     format!("{v:.2}")
 }
+fn fmt_money(v: f64) -> String {
+    format!("{v:.2}")
+}
+fn fmt_qty(v: f64) -> String {
+    format!("{v:.4}")
+}
 
 fn sign_color(v: f64) -> Color {
     if v < 0.0 { C_NEG } else { C_VALUE }
@@ -786,4 +1135,26 @@ fn kv_colored(label: &'static str, value: String, color: Color) -> Line<'static>
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ])
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+
+    horizontal[1]
 }
