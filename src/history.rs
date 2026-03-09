@@ -3,11 +3,13 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct Position {
+pub struct Trade {
     pub id: i64,
     pub ticker: String,
+    pub side: String,
     pub shares: f64,
-    pub avg_cost: f64,
+    pub price: f64,
+    pub date: String,
 }
 
 pub async fn init_db() -> Result<SqlitePool, sqlx::Error> {
@@ -21,11 +23,13 @@ pub async fn init_db() -> Result<SqlitePool, sqlx::Error> {
         .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS positions (
+        "CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
             shares REAL NOT NULL,
-            avg_cost REAL NOT NULL
+            price REAL NOT NULL,
+            date TEXT NOT NULL
         )",
     )
     .execute(&pool)
@@ -34,52 +38,60 @@ pub async fn init_db() -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-pub async fn list_positions(pool: &SqlitePool) -> Result<Vec<Position>, sqlx::Error> {
-    sqlx::query_as::<_, Position>(
-        "SELECT id, ticker, shares, avg_cost FROM positions ORDER BY ticker ASC, id ASC",
+pub async fn list_trades(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
+    sqlx::query_as::<_, Trade>(
+        "SELECT id, ticker, side, shares, price, date FROM trades ORDER BY date ASC, id ASC",
     )
     .fetch_all(pool)
     .await
 }
 
-pub async fn insert_position(
+pub async fn insert_trade(
     pool: &SqlitePool,
     ticker: &str,
+    side: &str,
     shares: f64,
-    avg_cost: f64,
+    price: f64,
+    date: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO positions (ticker, shares, avg_cost) VALUES (?1, ?2, ?3)",
+        "INSERT INTO trades (ticker, side, shares, price, date) VALUES (?1, ?2, ?3, ?4, ?5)",
     )
     .bind(ticker)
+    .bind(side)
     .bind(shares)
-    .bind(avg_cost)
+    .bind(price)
+    .bind(date)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn update_position(
+pub async fn update_trade(
     pool: &SqlitePool,
     id: i64,
     ticker: &str,
+    side: &str,
     shares: f64,
-    avg_cost: f64,
+    price: f64,
+    date: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE positions SET ticker = ?1, shares = ?2, avg_cost = ?3 WHERE id = ?4",
+        "UPDATE trades SET ticker = ?1, side = ?2, shares = ?3, price = ?4, date = ?5 WHERE id = ?6",
     )
     .bind(ticker)
+    .bind(side)
     .bind(shares)
-    .bind(avg_cost)
+    .bind(price)
+    .bind(date)
     .bind(id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn delete_position(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM positions WHERE id = ?1")
+pub async fn delete_trade(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM trades WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?;
