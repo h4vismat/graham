@@ -28,6 +28,22 @@ pub enum StockState {
     Error { ticker: String, message: String },
 }
 
+pub enum CvmReportState {
+    Idle,
+    Loading,
+    Loaded {
+        /// Report period label (e.g. "3T2024"), used as the overlay title.
+        period: String,
+        /// Structured rows.  Each inner `Vec<String>` is:
+        ///   - empty           → blank separator (skipped in table view)
+        ///   - single element  → section-header string
+        ///   - 2+ elements     → account code, description, value(s)
+        rows: Vec<Vec<String>>,
+        scroll: usize,
+    },
+    Error(String),
+}
+
 pub enum AiState {
     Unavailable,
     Loading,
@@ -66,6 +82,12 @@ pub struct StockScreen {
     pub news_selected: usize,
     pub financials_selected: FinancialSelection,
     pub financials_modal: Option<FinancialSelection>,
+    /// Whether keyboard focus is on the CVM quarterly-reports panel (Brazil only).
+    pub financials_in_reports: bool,
+    /// Currently selected quarterly report row in the CVM reports panel.
+    pub quarterly_report_selected: usize,
+    /// State of the in-app CVM report viewer overlay.
+    pub cvm_report: CvmReportState,
 }
 
 #[derive(Clone)]
@@ -169,6 +191,9 @@ impl StockScreen {
             news_selected: 0,
             financials_selected: FinancialSelection::new(0, 0),
             financials_modal: None,
+            financials_in_reports: false,
+            quarterly_report_selected: 0,
+            cvm_report: CvmReportState::Idle,
         }
     }
 
@@ -202,6 +227,31 @@ impl StockScreen {
         self.news_selected = 0;
         self.financials_selected = FinancialSelection::new(0, 0);
         self.financials_modal = None;
+        self.financials_in_reports = false;
+        self.quarterly_report_selected = 0;
+        self.cvm_report = CvmReportState::Idle;
+    }
+
+    pub fn clamp_quarterly_selection(&mut self, len: usize) {
+        if len == 0 {
+            self.quarterly_report_selected = 0;
+        } else if self.quarterly_report_selected >= len {
+            self.quarterly_report_selected = len - 1;
+        }
+    }
+
+    pub fn next_quarterly(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        self.quarterly_report_selected = (self.quarterly_report_selected + 1).min(len - 1);
+    }
+
+    pub fn prev_quarterly(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        self.quarterly_report_selected = self.quarterly_report_selected.saturating_sub(1);
     }
 
     pub fn clamp_news_selection(&mut self, len: usize) {

@@ -11,8 +11,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AiState, App, ChatMessage, ChatRole, ChatState, HistoryForm, HistoryMode, MenuMode, PERIODS,
-    Screen, StockState, TABS,
+    AiState, App, ChatMessage, ChatRole, ChatState, CvmReportState, HistoryForm, HistoryMode,
+    MenuMode, PERIODS, Screen, StockState, TABS,
 };
 use crate::financials::{self, FinancialSelection};
 use crate::models::{IndicatorData, StockIndicators};
@@ -101,6 +101,26 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
             }
         },
         Screen::Stock => {
+            // CVM report overlay takes priority over tab-level hints.
+            match &app.stock.cvm_report {
+                CvmReportState::Loading => {
+                    return f.render_widget(
+                        Paragraph::new(" Loading report…  |  Esc cancel  |  Ctrl+C quit")
+                            .style(Style::default().fg(C_DIM)),
+                        area,
+                    );
+                }
+                CvmReportState::Loaded { .. } | CvmReportState::Error(_) => {
+                    return f.render_widget(
+                        Paragraph::new(
+                            " ↑ ↓ / PgUp PgDn  scroll  |  Esc / q  close  |  Ctrl+C quit",
+                        )
+                        .style(Style::default().fg(C_DIM)),
+                        area,
+                    );
+                }
+                _ => {}
+            }
             let is_news = app.stock.active_tab == news_tab;
             let is_financials = app.stock.active_tab == financials_tab;
             let is_ai = app.stock.active_tab == ai_tab;
@@ -113,8 +133,10 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 (StockState::Loaded(_), _) if is_financials => {
                     if app.stock.financials_modal.is_some() {
                         " Enter / Esc close  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                    } else if app.stock.financials_in_reports {
+                        " j/k ↑↓ move  |  Enter open  |  Esc indicators  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
                     } else {
-                        " h j k l  move  |  Enter open  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        " h j k l  move  |  Enter open  |  c CVM reports  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
                     }
                 }
                 (StockState::Loaded(_), _) if is_ai => {
@@ -148,23 +170,29 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
         Screen::Stock => match &app.stock.state {
             StockState::Input => render_stock_input(f, area, app),
             StockState::Loading(t) => render_loading(f, area, t, app.tick),
-            StockState::Loaded(data) => render_loaded(
-                f,
-                area,
-                data,
-                app.stock.active_tab,
-                app.stock.active_period,
-                &app.stock.ai_state,
-                &app.stock.chat_state,
-                &app.stock.chat_messages,
-                app.stock.chat_input.as_str(),
-                app.stock.chat_scroll,
-                app.openrouter_key.is_some(),
-                app.tick,
-                app.stock.news_selected,
-                app.stock.financials_selected,
-                app.stock.financials_modal,
-            ),
+            StockState::Loaded(data) => {
+                render_loaded(
+                    f,
+                    area,
+                    data,
+                    app.stock.active_tab,
+                    app.stock.active_period,
+                    &app.stock.ai_state,
+                    &app.stock.chat_state,
+                    &app.stock.chat_messages,
+                    app.stock.chat_input.as_str(),
+                    app.stock.chat_scroll,
+                    app.openrouter_key.is_some(),
+                    app.tick,
+                    app.stock.news_selected,
+                    app.stock.financials_selected,
+                    app.stock.financials_modal,
+                    app.stock.financials_in_reports,
+                    app.stock.quarterly_report_selected,
+                );
+                // CVM report viewer drawn on top of everything else.
+                render_cvm_report_overlay(f, area, &app.stock.cvm_report, app.tick);
+            }
             StockState::Error { ticker, message } => render_error(f, area, ticker, message),
         },
     }
@@ -642,6 +670,8 @@ fn render_loaded(
     news_selected: usize,
     financials_selected: FinancialSelection,
     financials_modal: Option<FinancialSelection>,
+    financials_in_reports: bool,
+    quarterly_report_selected: usize,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -666,7 +696,10 @@ fn render_loaded(
     f.render_widget(tabs, chunks[0]);
 
     // Tab content
-    let financials_tab = TABS.iter().position(|&tab| tab == "Financials").unwrap_or(1);
+    let financials_tab = TABS
+        .iter()
+        .position(|&tab| tab == "Financials")
+        .unwrap_or(1);
     let ai_tab = TABS.iter().position(|&tab| tab == "AI").unwrap_or(2);
     let news_tab = TABS
         .iter()
@@ -675,7 +708,14 @@ fn render_loaded(
 
     match active_tab {
         0 => render_overview(f, chunks[1], data, active_period, ai_state, tick),
-        tab if tab == financials_tab => render_financials(f, chunks[1], data, financials_selected),
+        tab if tab == financials_tab => render_financials(
+            f,
+            chunks[1],
+            data,
+            financials_selected,
+            financials_in_reports,
+            quarterly_report_selected,
+        ),
         tab if tab == ai_tab => render_ai_tab(
             f,
             chunks[1],
@@ -977,6 +1017,8 @@ fn render_financials(
     area: Rect,
     data: &StockIndicators,
     selection: FinancialSelection,
+    in_reports: bool,
+    quarterly_selected: usize,
 ) {
     let sections = financials::sections(data);
     let selection = financials::clamp_selection(selection, &sections);
@@ -999,7 +1041,7 @@ fn render_financials(
         top[0],
         sections.get(0).map(|s| s.title).unwrap_or("Valuation"),
         sections.get(0).map(|s| s.rows.as_slice()).unwrap_or(&[]),
-        if selection.section == 0 {
+        if !in_reports && selection.section == 0 {
             Some(selection.row)
         } else {
             None
@@ -1010,7 +1052,7 @@ fn render_financials(
         top[1],
         sections.get(1).map(|s| s.title).unwrap_or("Debt"),
         sections.get(1).map(|s| s.rows.as_slice()).unwrap_or(&[]),
-        if selection.section == 1 {
+        if !in_reports && selection.section == 1 {
             Some(selection.row)
         } else {
             None
@@ -1026,7 +1068,7 @@ fn render_financials(
         middle[0],
         sections.get(2).map(|s| s.title).unwrap_or("Efficiency"),
         sections.get(2).map(|s| s.rows.as_slice()).unwrap_or(&[]),
-        if selection.section == 2 {
+        if !in_reports && selection.section == 2 {
             Some(selection.row)
         } else {
             None
@@ -1037,24 +1079,294 @@ fn render_financials(
         middle[1],
         sections.get(3).map(|s| s.title).unwrap_or("Profitability"),
         sections.get(3).map(|s| s.rows.as_slice()).unwrap_or(&[]),
-        if selection.section == 3 {
+        if !in_reports && selection.section == 3 {
             Some(selection.row)
         } else {
             None
         },
     );
 
-    render_indicator_table(
-        f,
-        rows[2],
-        sections.get(4).map(|s| s.title).unwrap_or("Growth"),
-        sections.get(4).map(|s| s.rows.as_slice()).unwrap_or(&[]),
-        if selection.section == 4 {
-            Some(selection.row)
-        } else {
-            None
-        },
-    );
+    // Bottom row: Growth always on the left; for Brazilian stocks also show
+    // the CVM quarterly-reports panel on the right.
+    match data.quarterly_reports.as_deref() {
+        Some(reports) if !reports.is_empty() => {
+            let bottom = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[2]);
+            render_indicator_table(
+                f,
+                bottom[0],
+                sections.get(4).map(|s| s.title).unwrap_or("Growth"),
+                sections.get(4).map(|s| s.rows.as_slice()).unwrap_or(&[]),
+                if !in_reports && selection.section == 4 {
+                    Some(selection.row)
+                } else {
+                    None
+                },
+            );
+            render_quarterly_reports(f, bottom[1], reports, quarterly_selected, in_reports);
+        }
+        _ => {
+            render_indicator_table(
+                f,
+                rows[2],
+                sections.get(4).map(|s| s.title).unwrap_or("Growth"),
+                sections.get(4).map(|s| s.rows.as_slice()).unwrap_or(&[]),
+                if selection.section == 4 {
+                    Some(selection.row)
+                } else {
+                    None
+                },
+            );
+        }
+    }
+}
+
+fn render_quarterly_reports(
+    f: &mut Frame,
+    area: Rect,
+    reports: &[crate::models::QuarterlyReport],
+    selected: usize,
+    focused: bool,
+) {
+    let border_style = if focused {
+        Style::default().fg(C_TAB)
+    } else {
+        Style::default().fg(C_DIM)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            " CVM Reports ",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ));
+
+    let clamped_selected = selected.min(reports.len().saturating_sub(1));
+
+    let list_items: Vec<ListItem> = reports
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let is_selected = focused && i == clamped_selected;
+            let mut item_lines = vec![Line::from(Span::styled(
+                r.period.as_str(),
+                Style::default().fg(C_LABEL).add_modifier(Modifier::BOLD),
+            ))];
+            if is_selected {
+                item_lines.push(Line::from(Span::styled(
+                    "[ Show ]",
+                    Style::default().fg(C_TAB).add_modifier(Modifier::BOLD),
+                )));
+            }
+            ListItem::new(item_lines)
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(clamped_selected));
+
+    let list = List::new(list_items)
+        .block(block)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(C_TAB).add_modifier(Modifier::BOLD));
+
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+// ─── CVM report viewer overlay ───────────────────────────────────────────────
+
+fn render_cvm_report_overlay(f: &mut Frame, area: Rect, state: &CvmReportState, tick: u64) {
+    match state {
+        CvmReportState::Idle => {}
+
+        CvmReportState::Loading => {
+            let modal_area = centered_rect(90, 90, area);
+            let spinner = SPINNER[(tick as usize / 2) % SPINNER.len()];
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_TAB))
+                .title(Span::styled(
+                    " CVM Report ",
+                    Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+                ));
+            let text = Line::from(vec![
+                Span::styled(format!("{spinner} "), Style::default().fg(C_TAB)),
+                Span::styled("Loading report from CVM…", Style::default().fg(C_DIM)),
+            ]);
+            f.render_widget(Clear, modal_area);
+            f.render_widget(
+                Paragraph::new(text)
+                    .block(block)
+                    .alignment(Alignment::Center),
+                modal_area,
+            );
+        }
+
+        CvmReportState::Error(msg) => {
+            let modal_area = centered_rect(70, 30, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_NEG))
+                .title(Span::styled(
+                    " CVM Report — Error ",
+                    Style::default().fg(C_NEG).add_modifier(Modifier::BOLD),
+                ));
+            f.render_widget(Clear, modal_area);
+            f.render_widget(
+                Paragraph::new(msg.as_str())
+                    .block(block)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(C_LABEL)),
+                modal_area,
+            );
+        }
+
+        CvmReportState::Loaded {
+            period,
+            rows,
+            scroll,
+        } => {
+            let modal_area = centered_rect(95, 92, area);
+            let title = format!(" CVM Report — {period} ");
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_TAB))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+                ));
+
+            f.render_widget(Clear, modal_area);
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            render_cvm_table(f, inner, rows, *scroll);
+        }
+    }
+}
+
+/// Render structured CVM rows as a ratatui Table with dynamic column widths.
+///
+/// Row encoding (from `extract_dados_table`):
+///   - `vec![header]`              → section-header row (bold cyan, spans all cols)
+///   - `vec![code, desc, v1, …]`  → data row; code & values may be empty
+fn render_cvm_table(f: &mut Frame, area: Rect, rows: &[Vec<String>], scroll: usize) {
+    if rows.is_empty() {
+        return;
+    }
+
+    // ── Determine number of value columns ────────────────────────────────────
+    let max_cols = rows
+        .iter()
+        .filter(|r| r.len() > 1)
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(2);
+    // Layout: [code] [description] [val1] [val2] [val3] …
+    let value_cols = max_cols.saturating_sub(2); // everything after code + desc
+
+    // ── Column-width computation ──────────────────────────────────────────────
+    // Code column: widest code cell, capped at 12.
+    let code_w = rows
+        .iter()
+        .filter(|r| r.len() > 1)
+        .map(|r| r[0].len())
+        .max()
+        .unwrap_or(6)
+        .min(12) as u16;
+
+    // Value columns: widest value cell in each column, capped at 22.
+    let mut val_widths: Vec<u16> = vec![0u16; value_cols];
+    for row in rows.iter().filter(|r| r.len() > 1) {
+        for (i, w) in val_widths.iter_mut().enumerate() {
+            if let Some(v) = row.get(i + 2) {
+                *w = (*w).max(v.len() as u16);
+            }
+        }
+    }
+    let val_widths: Vec<u16> = val_widths.iter().map(|&w| w.min(22).max(10)).collect();
+
+    // Description column gets the remaining width (Min(20) keeps it legible).
+    let mut constraints = vec![Constraint::Length(code_w)];
+    constraints.push(Constraint::Min(20)); // description
+    for &vw in &val_widths {
+        constraints.push(Constraint::Length(vw));
+    }
+
+    // ── Detect header row (first multi-cell row, usually "Conta / Descrição / dates") ──
+    let header_row_idx = rows.iter().position(|r| r.len() > 1);
+
+    // ── Build table rows (only the visible window) ───────────────────────────
+    let visible = area.height as usize;
+    let max_scroll = rows.len().saturating_sub(visible);
+    let offset = scroll.min(max_scroll);
+
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(idx, row)| {
+            if row.len() == 1 {
+                // Section header — spans visually by putting text in first cell.
+                let cell = Cell::from(format!(" {} ", row[0])).style(
+                    Style::default()
+                        .fg(C_TAB)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let empty = Cell::from("");
+                let mut cells = vec![cell];
+                cells.extend(
+                    std::iter::repeat_with(|| empty.clone()).take(1 + value_cols),
+                );
+                Row::new(cells).style(Style::default().bg(Color::Reset))
+            } else {
+                // Data row.
+                let is_header = Some(idx - offset + offset) == header_row_idx;
+                let code_str = row.first().map(String::as_str).unwrap_or("");
+                let desc_str = row.get(1).map(String::as_str).unwrap_or("");
+
+                let code_cell = Cell::from(code_str).style(Style::default().fg(C_DIM));
+                let desc_style = if is_header {
+                    Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C_LABEL)
+                };
+                let desc_cell = Cell::from(desc_str).style(desc_style);
+
+                let mut cells = vec![code_cell, desc_cell];
+                for i in 0..value_cols {
+                    let val = row.get(i + 2).map(String::as_str).unwrap_or("");
+                    let val_style = if is_header {
+                        Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)
+                    } else {
+                        value_color(val)
+                    };
+                    cells.push(Cell::from(val).style(val_style));
+                }
+                Row::new(cells)
+            }
+        })
+        .collect();
+
+    let table = Table::new(table_rows, constraints)
+        .column_spacing(1)
+        .style(Style::default().fg(C_LABEL));
+
+    f.render_widget(table, area);
+}
+
+/// Pick a colour for a numeric value cell: green for positive, red for
+/// negative, dim for zero / empty / non-numeric.
+fn value_color(s: &str) -> Style {
+    let trimmed = s.trim().replace('.', "").replace(',', ".");
+    match trimmed.parse::<f64>() {
+        Ok(v) if v > 0.0 => Style::default().fg(C_POS),
+        Ok(v) if v < 0.0 => Style::default().fg(C_NEG),
+        _ => Style::default().fg(C_DIM),
+    }
 }
 
 // ─── News tab ────────────────────────────────────────────────────────────────
@@ -1093,13 +1405,22 @@ fn render_news(f: &mut Frame, area: Rect, data: &StockIndicators, selected: usiz
                 Some(date) if !date.is_empty() => format!("{source} • {date}"),
                 _ => source.to_string(),
             };
-            ListItem::new(vec![
+            let mut lines = vec![
                 Line::from(Span::styled(
                     item.title.as_str(),
                     Style::default().fg(C_LABEL),
                 )),
                 Line::from(Span::styled(meta, Style::default().fg(C_DIM))),
-            ])
+            ];
+            if let Some(desc) = item.description.as_deref() {
+                if !desc.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        desc.to_string(),
+                        Style::default().fg(C_DIM),
+                    )));
+                }
+            }
+            ListItem::new(lines)
         })
         .collect();
 

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::models::*;
-use crate::{news, profile};
+use crate::{fundamentus, news, profile};
 
 // ─── Internal JSON types ──────────────────────────────────────────────────────
 
@@ -115,6 +115,77 @@ async fn fetch_price_period(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ─── News date sorting ────────────────────────────────────────────────────────
+
+/// Convert a `published_at` string to a comparable "YYYY-MM-DD" key so that
+/// items from different sources (RFC 2822 from Yahoo, DD/MM/YYYY from
+/// Fundamentus) sort correctly.  Unknown formats return an empty string
+/// (those items sink to the bottom).
+fn date_sort_key(published_at: &str) -> String {
+    let s = published_at.trim();
+
+    // Fundamentus: "DD/MM/YYYY"
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() == 3 && parts[2].len() == 4 {
+        return format!("{}-{}-{}", parts[2], parts[1], parts[0]);
+    }
+
+    // RFC 2822: "Mon, 09 Mar 2026 10:00:00 +0000"
+    //   or without day-of-week: "09 Mar 2026 10:00:00 +0000"
+    let s = if let Some(after_comma) = s.find(',') {
+        s[after_comma + 1..].trim()
+    } else {
+        s
+    };
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    if tokens.len() >= 3 {
+        let day = tokens[0];
+        let month = match tokens[1].to_lowercase().as_str() {
+            "jan" | "january" => "01",
+            "feb" | "february" => "02",
+            "mar" | "march" => "03",
+            "apr" | "april" => "04",
+            "may" => "05",
+            "jun" | "june" => "06",
+            "jul" | "july" => "07",
+            "aug" | "august" => "08",
+            "sep" | "september" => "09",
+            "oct" | "october" => "10",
+            "nov" | "november" => "11",
+            "dec" | "december" => "12",
+            _ => return String::new(),
+        };
+        let year = tokens[2];
+        return format!("{}-{}-{:0>2}", year, month, day);
+    }
+
+    String::new()
+}
+
+/// Merge two optional news lists, sort most-recent-first, limit to 50 items.
+fn merge_and_sort_news(
+    a: Option<Vec<NewsItem>>,
+    b: Option<Vec<NewsItem>>,
+) -> Option<Vec<NewsItem>> {
+    let mut combined: Vec<NewsItem> = Vec::new();
+    if let Some(v) = a {
+        combined.extend(v);
+    }
+    if let Some(v) = b {
+        combined.extend(v);
+    }
+    if combined.is_empty() {
+        return None;
+    }
+    combined.sort_by(|x, y| {
+        let kx = x.published_at.as_deref().map(date_sort_key).unwrap_or_default();
+        let ky = y.published_at.as_deref().map(date_sort_key).unwrap_or_default();
+        ky.cmp(&kx) // descending
+    });
+    combined.truncate(50);
+    Some(combined)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -323,13 +394,31 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
     // ── Fetch 5-year price history (shorter periods are sliced from the tail) ─
     let price_base = format!("https://statusinvest.com.br/{}", market.api_prefix());
     let price_client = client.clone();
-    let news_client = client.clone();
+    let fatos_client = client.clone();
+    let yahoo_client = client.clone();
     let profile_client = client.clone();
-    let (price_history, news, profile) = tokio::join!(
+    let reports_client = client.clone();
+    let is_brazil = matches!(market, Market::Brazil);
+    let (price_history, fatos_news, yahoo_news, profile, quarterly_reports) = tokio::join!(
         fetch_price_period(&price_client, &price_base, ticker, &page_url, 4),
-        news::fetch_yahoo_news_for_ticker(&news_client, ticker),
-        profile::fetch_profile_for_ticker(&profile_client, ticker)
+        async {
+            if is_brazil {
+                fundamentus::fetch_fatos_relevantes(&fatos_client, ticker).await
+            } else {
+                None
+            }
+        },
+        news::fetch_yahoo_news_for_ticker(&yahoo_client, ticker),
+        profile::fetch_profile_for_ticker(&profile_client, ticker),
+        async {
+            if is_brazil {
+                fundamentus::fetch_quarterly_reports(&reports_client, ticker).await
+            } else {
+                None
+            }
+        },
     );
+    let news = merge_and_sort_news(fatos_news, yahoo_news);
 
     Ok(StockIndicators {
         ticker: ticker.to_uppercase(),
@@ -383,6 +472,7 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
         price_history,
         news,
         profile,
+        quarterly_reports,
     })
 }
 

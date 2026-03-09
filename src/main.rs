@@ -1,6 +1,7 @@
 mod ai;
 mod app;
 mod financials;
+mod fundamentus;
 mod history;
 mod models;
 mod news;
@@ -9,18 +10,22 @@ mod scraper;
 mod ui;
 mod yahoo;
 
+mod stocks;
+
 use std::io;
 use std::process::Command;
 use std::time::Duration;
 
 use app::{
-    AiState, App, ChatMessage, ChatRole, ChatState, HistoryForm, HistoryMode, HoldingRow, MenuMode,
-    Screen, StockState, TABS, TradeRow,
+    AiState, App, ChatMessage, ChatRole, ChatState, CvmReportState, HistoryForm, HistoryMode,
+    HoldingRow, MenuMode, Screen, StockState, TABS, TradeRow,
 };
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+    },
 };
 use financials::{NavDir, clamp_selection, move_selection, sections as financial_sections};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -50,13 +55,16 @@ enum FormAction {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = history::init_db().await?;
+    stocks::sec::migrate_sec_tables(&db).await?;
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, db).await;
 
     // Always restore terminal before propagating errors
     disable_raw_mode()?;
@@ -72,14 +80,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    db: SqlitePool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<Result<models::StockIndicators, String>>(1);
     let (ai_tx, mut ai_rx) = mpsc::channel::<Result<String, String>>(1);
     let (chat_tx, mut chat_rx) = mpsc::channel::<Result<String, String>>(1);
     let (news_tx, mut news_rx) = mpsc::channel::<Result<Vec<models::NewsItem>, String>>(1);
+    let (cvm_tx, mut cvm_rx) = mpsc::channel::<Result<(String, Vec<Vec<String>>), String>>(1);
     let (history_tx, mut history_rx) = mpsc::channel::<HistoryMessage>(8);
     let (price_tx, mut price_rx) = mpsc::channel::<PriceMessage>(32);
-    let db = history::init_db().await?;
     let mut app = App::new();
     let news_tab = TABS
         .iter()
@@ -98,6 +107,15 @@ async fn run(
             _ => 0,
         };
         app.stock.clamp_news_selection(news_len);
+        let quarterly_len = match &app.stock.state {
+            StockState::Loaded(data) => data
+                .quarterly_reports
+                .as_ref()
+                .map(|r| r.len())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        app.stock.clamp_quarterly_selection(quarterly_len);
         let chat_max = chat_max_scroll(
             &app.stock.chat_messages,
             &app.stock.chat_state,
@@ -114,6 +132,51 @@ async fn run(
                 // ── Universal quit ──────────────────────────────────────
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     app.should_quit = true;
+                    continue;
+                }
+
+                // ── CVM report viewer: intercept keys when overlay is open ──
+                if matches!(
+                    app.stock.cvm_report,
+                    CvmReportState::Loading
+                        | CvmReportState::Loaded { .. }
+                        | CvmReportState::Error(_)
+                ) {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.stock.cvm_report = CvmReportState::Idle;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if let CvmReportState::Loaded { scroll, .. } =
+                                &mut app.stock.cvm_report
+                            {
+                                *scroll = scroll.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if let CvmReportState::Loaded { rows, scroll, .. } =
+                                &mut app.stock.cvm_report
+                            {
+                                *scroll = (*scroll + 1).min(rows.len().saturating_sub(1));
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            if let CvmReportState::Loaded { scroll, .. } =
+                                &mut app.stock.cvm_report
+                            {
+                                *scroll = scroll.saturating_sub(cvm_page_step());
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            if let CvmReportState::Loaded { rows, scroll, .. } =
+                                &mut app.stock.cvm_report
+                            {
+                                *scroll =
+                                    (*scroll + cvm_page_step()).min(rows.len().saturating_sub(1));
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -209,16 +272,27 @@ async fn run(
                             StockState::Loaded(_) | StockState::Error { .. },
                             KeyCode::Char('q'),
                             _,
-                        )
-                        | (StockState::Loaded(_) | StockState::Error { .. }, KeyCode::Esc, _) => {
+                        ) => {
+                            app.stock.go_to_input();
+                        }
+                        // Esc while in reports mode: exit reports mode only.
+                        (StockState::Loaded(_), KeyCode::Esc, _)
+                            if app.stock.financials_in_reports =>
+                        {
+                            app.stock.financials_in_reports = false;
+                        }
+                        // Esc in all other cases: go back to ticker input.
+                        (StockState::Loaded(_) | StockState::Error { .. }, KeyCode::Esc, _) => {
                             app.stock.go_to_input();
                         }
                         (StockState::Loaded(_), KeyCode::Right, _)
                         | (StockState::Loaded(_), KeyCode::Tab, _) => {
+                            app.stock.financials_in_reports = false;
                             app.stock.next_tab();
                         }
                         (StockState::Loaded(_), KeyCode::Left, _)
                         | (StockState::Loaded(_), KeyCode::BackTab, _) => {
+                            app.stock.financials_in_reports = false;
                             app.stock.prev_tab();
                         }
                         (StockState::Loaded(data), KeyCode::Enter, _)
@@ -232,10 +306,7 @@ async fn run(
                                 continue;
                             }
                             let Some(key) = app.openrouter_key.clone() else {
-                                app.set_status(
-                                    "Define OPENROUTER_API_KEY to enable AI chat.",
-                                    180,
-                                );
+                                app.set_status("Define OPENROUTER_API_KEY to enable AI chat.", 180);
                                 continue;
                             };
                             let json = serde_json::to_string(&**data).unwrap_or_default();
@@ -306,16 +377,79 @@ async fn run(
                         {
                             app.stock.active_tab = news_tab;
                             app.stock.financials_modal = None;
+                            app.stock.financials_in_reports = false;
                         }
                         (StockState::Loaded(_), KeyCode::Char('a'), _)
                             if app.stock.active_tab != ai_tab =>
                         {
                             app.stock.active_tab = ai_tab;
                             app.stock.financials_modal = None;
+                            app.stock.financials_in_reports = false;
                         }
+                        // ── CVM reports panel: enter focus ──────────────
+                        (StockState::Loaded(data), KeyCode::Char('c'), _)
+                            if app.stock.active_tab == financials_tab
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports
+                                && data
+                                    .quarterly_reports
+                                    .as_ref()
+                                    .map_or(false, |r| !r.is_empty()) =>
+                        {
+                            app.stock.financials_in_reports = true;
+                        }
+                        // ── CVM reports panel: navigate ───────────────────
+                        (StockState::Loaded(_), KeyCode::Char('j') | KeyCode::Down, _)
+                            if app.stock.active_tab == financials_tab
+                                && app.stock.financials_in_reports =>
+                        {
+                            app.stock.next_quarterly(quarterly_len);
+                        }
+                        (StockState::Loaded(_), KeyCode::Char('k') | KeyCode::Up, _)
+                            if app.stock.active_tab == financials_tab
+                                && app.stock.financials_in_reports =>
+                        {
+                            app.stock.prev_quarterly(quarterly_len);
+                        }
+                        // ── CVM reports panel: show report in-app ────────
+                        (StockState::Loaded(data), KeyCode::Enter, _)
+                            if app.stock.active_tab == financials_tab
+                                && app.stock.financials_in_reports =>
+                        {
+                            let report = data
+                                .quarterly_reports
+                                .as_ref()
+                                .and_then(|r| r.get(app.stock.quarterly_report_selected))
+                                .cloned();
+                            match report {
+                                Some(r) if !r.link.is_empty() => {
+                                    app.stock.cvm_report = CvmReportState::Loading;
+                                    let cvm_tx = cvm_tx.clone();
+                                    let period = r.period.clone();
+                                    let link = r.link.clone();
+                                    tokio::spawn(async move {
+                                        let client = reqwest::Client::new();
+                                        let res = match fundamentus::fetch_cvm_report(
+                                            &client, &link,
+                                        )
+                                        .await
+                                        {
+                                            Some(lines) => Ok((period, lines)),
+                                            None => Err("Failed to load report.".to_string()),
+                                        };
+                                        let _ = cvm_tx.send(res).await;
+                                    });
+                                }
+                                _ => {
+                                    app.set_status("No link available for this report.", 120);
+                                }
+                            }
+                        }
+                        // ── Indicator grid navigation ─────────────────────
                         (StockState::Loaded(data), KeyCode::Char('h'), _)
                             if app.stock.active_tab == financials_tab
-                                && app.stock.financials_modal.is_none() =>
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports =>
                         {
                             let sections = financial_sections(data);
                             app.stock.financials_selected = move_selection(
@@ -326,7 +460,8 @@ async fn run(
                         }
                         (StockState::Loaded(data), KeyCode::Char('j'), _)
                             if app.stock.active_tab == financials_tab
-                                && app.stock.financials_modal.is_none() =>
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports =>
                         {
                             let sections = financial_sections(data);
                             app.stock.financials_selected = move_selection(
@@ -337,7 +472,8 @@ async fn run(
                         }
                         (StockState::Loaded(data), KeyCode::Char('k'), _)
                             if app.stock.active_tab == financials_tab
-                                && app.stock.financials_modal.is_none() =>
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports =>
                         {
                             let sections = financial_sections(data);
                             app.stock.financials_selected = move_selection(
@@ -348,7 +484,8 @@ async fn run(
                         }
                         (StockState::Loaded(data), KeyCode::Char('l'), _)
                             if app.stock.active_tab == financials_tab
-                                && app.stock.financials_modal.is_none() =>
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports =>
                         {
                             let sections = financial_sections(data);
                             app.stock.financials_selected = move_selection(
@@ -406,7 +543,8 @@ async fn run(
                         }
                         (StockState::Loaded(_), KeyCode::Enter, _)
                             if app.stock.active_tab == financials_tab
-                                && app.stock.financials_modal.is_none() =>
+                                && app.stock.financials_modal.is_none()
+                                && !app.stock.financials_in_reports =>
                         {
                             app.stock.financials_modal = Some(app.stock.financials_selected);
                         }
@@ -414,12 +552,18 @@ async fn run(
                             if app.stock.active_tab == news_tab =>
                         {
                             let ticker = data.ticker.clone();
+                            // B3 tickers end in a digit; use Fundamentus for those.
+                            let is_brazil =
+                                ticker.chars().last().map_or(false, |c| c.is_ascii_digit());
                             app.set_status("Refreshing news…", 120);
                             let news_tx = news_tx.clone();
                             tokio::spawn(async move {
                                 let client = reqwest::Client::new();
-                                let news =
-                                    news::fetch_yahoo_news_for_ticker(&client, &ticker).await;
+                                let news = if is_brazil {
+                                    fundamentus::fetch_fatos_relevantes(&client, &ticker).await
+                                } else {
+                                    news::fetch_yahoo_news_for_ticker(&client, &ticker).await
+                                };
                                 let res = match news {
                                     Some(items) => Ok(items),
                                     None => Err("Failed to refresh news.".to_string()),
@@ -447,12 +591,14 @@ async fn run(
                         {
                             app.stock.active_tab = 0;
                             app.stock.financials_modal = None;
+                            app.stock.financials_in_reports = false;
                         }
                         (StockState::Loaded(_), KeyCode::Char('f'), _)
                             if app.stock.active_tab != ai_tab =>
                         {
                             app.stock.active_tab = 1;
                             app.stock.financials_modal = None;
+                            app.stock.financials_in_reports = false;
                         }
                         (StockState::Loaded(_), KeyCode::Char('v' | 'd' | 'e' | 'p' | 'g'), _)
                             if app.stock.active_tab != ai_tab =>
@@ -681,6 +827,18 @@ async fn run(
                     );
                 }
             }
+        }
+
+        // Receive CVM report content
+        if let Ok(result) = cvm_rx.try_recv() {
+            app.stock.cvm_report = match result {
+                Ok((period, rows)) => CvmReportState::Loaded {
+                    period,
+                    rows,
+                    scroll: 0,
+                },
+                Err(msg) => CvmReportState::Error(msg),
+            };
         }
 
         // Receive news refresh result
@@ -1041,6 +1199,13 @@ fn chat_max_scroll(
     }
     let lines = chat_line_count(chat_messages, chat_state, ai_enabled);
     lines.saturating_sub(height)
+}
+
+/// Number of lines to scroll per PageUp / PageDown in the CVM report viewer.
+fn cvm_page_step() -> usize {
+    let Ok((_, rows)) = size() else { return 20 };
+    // Overlay is ~92 % tall; subtract borders.
+    ((rows as usize).saturating_sub(4)) * 92 / 100
 }
 
 fn open_in_browser(url: &str) -> io::Result<()> {

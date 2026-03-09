@@ -12,6 +12,20 @@ pub struct NewsItem {
     pub link: String,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
+    /// Short description / summary (RSS description, or extra columns from
+    /// Fundamentus fatos relevantes).
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarterlyReport {
+    /// e.g. "3T2024" or "12/2023"
+    pub period: String,
+    /// Publication date as shown by Fundamentus (e.g. "14/11/2024")
+    pub published: String,
+    /// Direct URL to the rad.cvm.gov.br document (resolved from the
+    /// Fundamentus redirect at fetch time).
+    pub link: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,4 +125,8 @@ pub struct StockIndicators {
     /// Company profile data from Yahoo Finance (if available).
     #[serde(skip_serializing)]
     pub profile: Option<CompanyProfile>,
+    /// Quarterly / annual ITR-DFP filings from CVM via Fundamentus.
+    /// Only populated for Brazilian (B3) tickers.
+    #[serde(skip_serializing)]
+    pub quarterly_reports: Option<Vec<QuarterlyReport>>,
 }

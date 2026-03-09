@@ -56,12 +56,34 @@ fn news_item_from_rss(item: &rss::Item) -> Option<NewsItem> {
         return None;
     }
 
+    // Strip HTML tags from the RSS description if present.
+    let description = item.description().and_then(|d| {
+        let stripped = strip_html(d.trim());
+        if stripped.is_empty() { None } else { Some(stripped) }
+    });
+
     Some(NewsItem {
         title: title.to_string(),
         link: link.to_string(),
         publisher: item.source().and_then(|s| s.title()).map(|t| t.to_string()),
         published_at: item.pub_date().map(|d| d.to_string()),
+        description,
     })
+}
+
+/// Remove HTML tags from a string, collapsing whitespace.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_filtered(item: &rss::Item, title: &str, link: &str) -> bool {
