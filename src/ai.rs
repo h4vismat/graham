@@ -41,7 +41,8 @@ pub async fn analyze_stock(indicators_json: &str, api_key: &str) -> Result<Strin
     );
 
     let request = ChatRequest {
-        model: "arcee-ai/trinity-large-preview:free".to_string(),
+        model: std::env::var("OPENROUTER_MODEL")
+            .unwrap_or("arcee-ai/trinity-large-preview:free".to_string()),
         messages: vec![Message {
             role: "user".to_string(),
             content: prompt,
