@@ -6,6 +6,21 @@ pub struct PricePoint {
     pub price: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewsItem {
+    pub title: String,
+    pub link: String,
+    pub publisher: Option<String>,
+    pub published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompanyProfile {
+    pub description: String,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct YearlyValue {
     pub year: i32,
@@ -90,4 +105,10 @@ pub struct StockIndicators {
     /// Full 5-year daily price history, oldest → newest. Shorter periods are sliced from the tail.
     #[serde(skip_serializing)]
     pub price_history: Vec<PricePoint>,
+    /// Latest news headlines (if available).
+    #[serde(skip_serializing)]
+    pub news: Option<Vec<NewsItem>>,
+    /// Company profile data from Yahoo Finance (if available).
+    #[serde(skip_serializing)]
+    pub profile: Option<CompanyProfile>,
 }

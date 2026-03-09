@@ -7,6 +7,7 @@ pub const TABS: &[&str] = &[
     "Efficiency",
     "Profitability",
     "Growth",
+    "News",
 ];
 
 pub const PERIODS: &[&str] = &["30d", "6m", "1y", "5y"];
@@ -34,6 +35,9 @@ pub struct App {
     pub tick: u64,
     pub ai_state: AiState,
     pub openrouter_key: Option<String>,
+    pub news_selected: usize,
+    pub status_message: Option<String>,
+    pub status_expires_at: Option<u64>,
 }
 
 impl App {
@@ -48,11 +52,20 @@ impl App {
             tick: 0,
             ai_state: AiState::Unavailable,
             openrouter_key,
+            news_selected: 0,
+            status_message: None,
+            status_expires_at: None,
         }
     }
 
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        if let Some(expires_at) = self.status_expires_at {
+            if self.tick >= expires_at {
+                self.status_message = None;
+                self.status_expires_at = None;
+            }
+        }
     }
 
     pub fn next_tab(&mut self) {
@@ -76,5 +89,33 @@ impl App {
         self.input.clear();
         self.active_tab = 0;
         self.ai_state = AiState::Unavailable;
+        self.news_selected = 0;
+    }
+
+    pub fn clamp_news_selection(&mut self, len: usize) {
+        if len == 0 {
+            self.news_selected = 0;
+        } else if self.news_selected >= len {
+            self.news_selected = len - 1;
+        }
+    }
+
+    pub fn next_news(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        self.news_selected = (self.news_selected + 1).min(len - 1);
+    }
+
+    pub fn prev_news(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        self.news_selected = self.news_selected.saturating_sub(1);
+    }
+
+    pub fn set_status(&mut self, message: impl Into<String>, ttl_ticks: u64) {
+        self.status_message = Some(message.into());
+        self.status_expires_at = Some(self.tick.saturating_add(ttl_ticks));
     }
 }

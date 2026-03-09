@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::models::*;
+use crate::{news, profile};
 
 // ─── Internal JSON types ──────────────────────────────────────────────────────
 
@@ -321,7 +322,14 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
 
     // ── Fetch 5-year price history (shorter periods are sliced from the tail) ─
     let price_base = format!("https://statusinvest.com.br/{}", market.api_prefix());
-    let price_history = fetch_price_period(&client, &price_base, ticker, &page_url, 4).await;
+    let price_client = client.clone();
+    let news_client = client.clone();
+    let profile_client = client.clone();
+    let (price_history, news, profile) = tokio::join!(
+        fetch_price_period(&price_client, &price_base, ticker, &page_url, 4),
+        news::fetch_yahoo_news_for_ticker(&news_client, ticker),
+        profile::fetch_profile_for_ticker(&profile_client, ticker)
+    );
 
     Ok(StockIndicators {
         ticker: ticker.to_uppercase(),
@@ -373,5 +381,7 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
             earnings_cagr5: build_indicator(&indicators, "lucros_cagr5"),
         },
         price_history,
+        news,
+        profile,
     })
 }

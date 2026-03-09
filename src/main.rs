@@ -1,13 +1,17 @@
 mod ai;
 mod app;
 mod models;
+mod news;
+mod profile;
 mod scraper;
+mod yahoo;
 mod ui;
 
 use std::io;
+use std::process::Command;
 use std::time::Duration;
 
-use app::{AiState, App, State};
+use app::{AiState, App, State, TABS};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -43,10 +47,17 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<Result<models::StockIndicators, String>>(1);
     let (ai_tx, mut ai_rx) = mpsc::channel::<Result<String, String>>(1);
+    let (news_tx, mut news_rx) = mpsc::channel::<Result<Vec<models::NewsItem>, String>>(1);
     let mut app = App::new();
+    let news_tab = TABS.len().saturating_sub(1);
 
     loop {
         app.on_tick();
+        let news_len = match &app.state {
+            State::Loaded(data) => data.news.as_ref().map(|n| n.len()).unwrap_or(0),
+            _ => 0,
+        };
+        app.clamp_news_selection(news_len);
         terminal.draw(|f| ui::render(f, &app))?;
 
         // Poll terminal events (50 ms timeout keeps the spinner animating)
@@ -97,6 +108,60 @@ async fn run(
                     (State::Loaded(_), KeyCode::Left, _)
                     | (State::Loaded(_), KeyCode::BackTab, _) => {
                         app.prev_tab();
+                    }
+                    (State::Loaded(_), KeyCode::Char('n'), _) => {
+                        app.active_tab = news_tab;
+                    }
+                    (State::Loaded(_), KeyCode::Down, _) if app.active_tab == news_tab => {
+                        let len = match &app.state {
+                            State::Loaded(data) => data.news.as_ref().map(|n| n.len()).unwrap_or(0),
+                            _ => 0,
+                        };
+                        app.next_news(len);
+                    }
+                    (State::Loaded(_), KeyCode::Up, _) if app.active_tab == news_tab => {
+                        let len = match &app.state {
+                            State::Loaded(data) => data.news.as_ref().map(|n| n.len()).unwrap_or(0),
+                            _ => 0,
+                        };
+                        app.prev_news(len);
+                    }
+                    (State::Loaded(_), KeyCode::Enter, _) if app.active_tab == news_tab => {
+                        let link = match &app.state {
+                            State::Loaded(data) => data
+                                .news
+                                .as_ref()
+                                .and_then(|n| n.get(app.news_selected))
+                                .map(|item| item.link.clone()),
+                            _ => None,
+                        };
+                        match link {
+                            Some(link) => {
+                                if let Err(err) = open_in_browser(&link) {
+                                    app.set_status(
+                                        format!("Failed to open browser: {err}"),
+                                        120,
+                                    );
+                                }
+                            }
+                            None => {
+                                app.set_status("No news item selected.", 120);
+                            }
+                        }
+                    }
+                    (State::Loaded(data), KeyCode::Char('r'), _) if app.active_tab == news_tab => {
+                        let ticker = data.ticker.clone();
+                        app.set_status("Refreshing news…", 120);
+                        let news_tx = news_tx.clone();
+                        tokio::spawn(async move {
+                            let client = reqwest::Client::new();
+                            let news = news::fetch_yahoo_news_for_ticker(&client, &ticker).await;
+                            let res = match news {
+                                Some(items) => Ok(items),
+                                None => Err("Failed to refresh news.".to_string()),
+                            };
+                            let _ = news_tx.send(res).await;
+                        });
                     }
                     // Period switching on Overview tab (keys 1-4 or , / .)
                     (State::Loaded(_), KeyCode::Char(','), _) if app.active_tab == 0 => {
@@ -150,6 +215,7 @@ async fn run(
                             });
                         }
                         app.state = State::Loaded(Box::new(data));
+                        app.news_selected = 0;
                     }
                     Err(msg) => {
                         let ticker = app.input.clone();
@@ -168,10 +234,52 @@ async fn run(
             };
         }
 
+        // Receive news refresh result
+        if let Ok(result) = news_rx.try_recv() {
+            match result {
+                Ok(items) => {
+                    if let State::Loaded(data) = &mut app.state {
+                        data.news = Some(items);
+                        app.news_selected = 0;
+                        app.set_status("News refreshed.", 120);
+                    }
+                }
+                Err(msg) => {
+                    app.set_status(msg, 120);
+                }
+            }
+        }
+
         if app.should_quit {
             break;
         }
     }
 
     Ok(())
+}
+
+fn open_in_browser(url: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open").arg(url).spawn()?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unsupported platform",
+    ))
 }

@@ -5,8 +5,8 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, Tabs,
-        Wrap,
+        Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState,
+        Paragraph, Row, Table, Tabs, Wrap,
     },
 };
 
@@ -67,19 +67,28 @@ fn render_title_bar(f: &mut Frame, area: Rect, app: &App) {
 // ─── Status bar ───────────────────────────────────────────────────────────────
 
 fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
+    let is_news = app.active_tab + 1 == TABS.len();
     let hint = match (&app.state, app.active_tab) {
         (State::Input, _) => " Enter ticker and press ↵  |  Ctrl+C quit",
         (State::Loading(_), _) => " Loading…  |  Ctrl+C quit",
+        (State::Loaded(_), _) if is_news => {
+            " ↑ ↓  select  |  Enter open  |  r refresh  |  o v d e p g n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+        }
         (State::Loaded(_), 0) => {
-            " o v d e p g  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
+            " o v d e p g n  jump tab  |  ← →  cycle  |  1-4 / , .  period  |  q / Esc back  |  Ctrl+C quit"
         }
         (State::Loaded(_), _) => {
-            " o v d e p g  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
+            " o v d e p g n  jump tab  |  ← →  cycle  |  q / Esc back  |  Ctrl+C quit"
         }
         (State::Error { .. }, _) => " q / Esc back to search  |  Ctrl+C quit",
     };
 
-    f.render_widget(Paragraph::new(hint).style(Style::default().fg(C_DIM)), area);
+    let (text, style) = match &app.status_message {
+        Some(msg) => (msg.as_str(), Style::default().fg(C_NEG)),
+        None => (hint, Style::default().fg(C_DIM)),
+    };
+
+    f.render_widget(Paragraph::new(text).style(style), area);
 }
 
 // ─── Content router ──────────────────────────────────────────────────────────
@@ -89,7 +98,16 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
         State::Input => render_input(f, area, app),
         State::Loading(t) => render_loading(f, area, t, app.tick),
         State::Loaded(data) => {
-            render_loaded(f, area, data, app.active_tab, app.active_period, &app.ai_state, app.tick)
+            render_loaded(
+                f,
+                area,
+                data,
+                app.active_tab,
+                app.active_period,
+                &app.ai_state,
+                app.tick,
+                app.news_selected,
+            )
         }
         State::Error { ticker, message } => render_error(f, area, ticker, message),
     }
@@ -238,6 +256,7 @@ fn render_loaded(
     active_period: usize,
     ai_state: &AiState,
     tick: u64,
+    news_selected: usize,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -269,6 +288,7 @@ fn render_loaded(
         3 => render_indicator_table(f, chunks[1], "Efficiency", &efficiency_rows(data)),
         4 => render_indicator_table(f, chunks[1], "Profitability", &profitability_rows(data)),
         5 => render_indicator_table(f, chunks[1], "Growth", &growth_rows(data)),
+        6 => render_news(f, chunks[1], data, news_selected),
         _ => {}
     }
 }
@@ -359,6 +379,63 @@ fn render_overview(
 
     // ── Bottom: AI analysis panel ──
     render_ai_analysis(f, rows[2], ai_state, tick);
+}
+
+// ─── News tab ────────────────────────────────────────────────────────────────
+
+fn render_news(f: &mut Frame, area: Rect, data: &StockIndicators, selected: usize) {
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " News ",
+        Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+    ));
+
+    let Some(items) = data.news.as_ref() else {
+        f.render_widget(
+            Paragraph::new("No news available for this ticker.")
+                .block(block)
+                .style(Style::default().fg(C_DIM)),
+            area,
+        );
+        return;
+    };
+
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new("No news available for this ticker.")
+                .block(block)
+                .style(Style::default().fg(C_DIM)),
+            area,
+        );
+        return;
+    }
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .map(|item| {
+            let source = item.publisher.as_deref().unwrap_or("Yahoo Finance");
+            let meta = match item.published_at.as_deref() {
+                Some(date) if !date.is_empty() => format!("{source} • {date}"),
+                _ => source.to_string(),
+            };
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    item.title.as_str(),
+                    Style::default().fg(C_LABEL),
+                )),
+                Line::from(Span::styled(meta, Style::default().fg(C_DIM))),
+            ])
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(items.len().saturating_sub(1))));
+
+    let list = List::new(list_items)
+        .block(block)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(C_TAB).add_modifier(Modifier::BOLD));
+
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_ai_analysis(f: &mut Frame, area: Rect, ai_state: &AiState, tick: u64) {
