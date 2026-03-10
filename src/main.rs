@@ -1,24 +1,23 @@
 mod ai;
 mod app;
 mod financials;
-mod fundamentus;
 mod history;
 mod models;
 mod news;
 mod profile;
 mod scraper;
-mod ui;
-mod yahoo;
-
+mod sources;
 mod stocks;
+mod ui;
 
 use std::io;
 use std::process::Command;
 use std::time::Duration;
 
 use app::{
-    AiState, App, ChatMessage, ChatRole, ChatState, CvmReportState, HistoryForm, HistoryMode,
-    HoldingRow, MenuMode, Screen, StockState, TABS, TradeRow,
+    AiState, App, ChatMessage, ChatRole, ChatState, CompanyReportModal, CompanyReportStatement,
+    CvmReportState, HistoryForm, HistoryMode, HoldingRow, MenuMode, ReportFrequency, Screen,
+    StockState, TABS, TradeRow,
 };
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -107,15 +106,11 @@ async fn run(
             _ => 0,
         };
         app.stock.clamp_news_selection(news_len);
-        let quarterly_len = match &app.stock.state {
-            StockState::Loaded(data) => data
-                .quarterly_reports
-                .as_ref()
-                .map(|r| r.len())
-                .unwrap_or(0),
+        let reports_len = match &app.stock.state {
+            StockState::Loaded(data) => company_reports_len(data, app.stock.report_frequency),
             _ => 0,
         };
-        app.stock.clamp_quarterly_selection(quarterly_len);
+        app.stock.clamp_company_report_selection(reports_len);
         let chat_max = chat_max_scroll(
             &app.stock.chat_messages,
             &app.stock.chat_state,
@@ -147,8 +142,7 @@ async fn run(
                             app.stock.cvm_report = CvmReportState::Idle;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if let CvmReportState::Loaded { scroll, .. } =
-                                &mut app.stock.cvm_report
+                            if let CvmReportState::Loaded { scroll, .. } = &mut app.stock.cvm_report
                             {
                                 *scroll = scroll.saturating_sub(1);
                             }
@@ -161,8 +155,7 @@ async fn run(
                             }
                         }
                         KeyCode::PageUp => {
-                            if let CvmReportState::Loaded { scroll, .. } =
-                                &mut app.stock.cvm_report
+                            if let CvmReportState::Loaded { scroll, .. } = &mut app.stock.cvm_report
                             {
                                 *scroll = scroll.saturating_sub(cvm_page_step());
                             }
@@ -174,6 +167,49 @@ async fn run(
                                 *scroll =
                                     (*scroll + cvm_page_step()).min(rows.len().saturating_sub(1));
                             }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if let (StockState::Loaded(data), Some(modal)) =
+                    (&app.stock.state, &mut app.stock.company_report_modal)
+                {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.stock.company_report_modal = None;
+                        }
+                        KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                            modal.statement = modal.statement.prev();
+                            modal.scroll = 0;
+                        }
+                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                            modal.statement = modal.statement.next();
+                            modal.scroll = 0;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            modal.scroll = modal.scroll.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let max_rows = company_report_rows_len(
+                                data,
+                                app.stock.report_frequency,
+                                modal.statement,
+                            );
+                            modal.scroll = (modal.scroll + 1).min(max_rows.saturating_sub(1));
+                        }
+                        KeyCode::PageUp => {
+                            modal.scroll = modal.scroll.saturating_sub(cvm_page_step());
+                        }
+                        KeyCode::PageDown => {
+                            let max_rows = company_report_rows_len(
+                                data,
+                                app.stock.report_frequency,
+                                modal.statement,
+                            );
+                            modal.scroll =
+                                (modal.scroll + cvm_page_step()).min(max_rows.saturating_sub(1));
                         }
                         _ => {}
                     }
@@ -378,6 +414,8 @@ async fn run(
                             app.stock.active_tab = news_tab;
                             app.stock.financials_modal = None;
                             app.stock.financials_in_reports = false;
+                            app.stock.company_report_modal = None;
+                            app.stock.cvm_report = CvmReportState::Idle;
                         }
                         (StockState::Loaded(_), KeyCode::Char('a'), _)
                             if app.stock.active_tab != ai_tab =>
@@ -385,65 +423,91 @@ async fn run(
                             app.stock.active_tab = ai_tab;
                             app.stock.financials_modal = None;
                             app.stock.financials_in_reports = false;
+                            app.stock.company_report_modal = None;
+                            app.stock.cvm_report = CvmReportState::Idle;
                         }
-                        // ── CVM reports panel: enter focus ──────────────
+                        // ── Company reports panel: enter focus ───────────
                         (StockState::Loaded(data), KeyCode::Char('c'), _)
                             if app.stock.active_tab == financials_tab
                                 && app.stock.financials_modal.is_none()
                                 && !app.stock.financials_in_reports
-                                && data
-                                    .quarterly_reports
-                                    .as_ref()
-                                    .map_or(false, |r| !r.is_empty()) =>
+                                && company_reports_len(data, app.stock.report_frequency) > 0 =>
                         {
                             app.stock.financials_in_reports = true;
                         }
-                        // ── CVM reports panel: navigate ───────────────────
+                        // ── Company reports panel: navigate ───────────────
                         (StockState::Loaded(_), KeyCode::Char('j') | KeyCode::Down, _)
                             if app.stock.active_tab == financials_tab
                                 && app.stock.financials_in_reports =>
                         {
-                            app.stock.next_quarterly(quarterly_len);
+                            app.stock.next_company_report(reports_len);
                         }
                         (StockState::Loaded(_), KeyCode::Char('k') | KeyCode::Up, _)
                             if app.stock.active_tab == financials_tab
                                 && app.stock.financials_in_reports =>
                         {
-                            app.stock.prev_quarterly(quarterly_len);
+                            app.stock.prev_company_report(reports_len);
                         }
-                        // ── CVM reports panel: show report in-app ────────
+                        // ── Company reports panel: show report in-app ─────
                         (StockState::Loaded(data), KeyCode::Enter, _)
                             if app.stock.active_tab == financials_tab
                                 && app.stock.financials_in_reports =>
                         {
-                            let report = data
-                                .quarterly_reports
-                                .as_ref()
-                                .and_then(|r| r.get(app.stock.quarterly_report_selected))
-                                .cloned();
-                            match report {
-                                Some(r) if !r.link.is_empty() => {
-                                    app.stock.cvm_report = CvmReportState::Loading;
-                                    let cvm_tx = cvm_tx.clone();
-                                    let period = r.period.clone();
-                                    let link = r.link.clone();
-                                    tokio::spawn(async move {
-                                        let client = reqwest::Client::new();
-                                        let res = match fundamentus::fetch_cvm_report(
-                                            &client, &link,
-                                        )
-                                        .await
-                                        {
-                                            Some(lines) => Ok((period, lines)),
-                                            None => Err("Failed to load report.".to_string()),
-                                        };
-                                        let _ = cvm_tx.send(res).await;
-                                    });
+                            if let Some(reports) = data.quarterly_reports.as_ref() {
+                                let report =
+                                    reports.get(app.stock.company_report_selected).cloned();
+                                match report {
+                                    Some(r) if !r.link.is_empty() => {
+                                        app.stock.cvm_report = CvmReportState::Loading;
+                                        let cvm_tx = cvm_tx.clone();
+                                        let period = r.period.clone();
+                                        let link = r.link.clone();
+                                        tokio::spawn(async move {
+                                            let client = reqwest::Client::new();
+                                            let res = match sources::fundamentus::fetch_cvm_report(
+                                                &client, &link,
+                                            )
+                                            .await
+                                            {
+                                                Some(lines) => Ok((period, lines)),
+                                                None => Err("Failed to load report.".to_string()),
+                                            };
+                                            let _ = cvm_tx.send(res).await;
+                                        });
+                                    }
+                                    _ => {
+                                        app.set_status("No link available for this report.", 120);
+                                    }
                                 }
-                                _ => {
-                                    app.set_status("No link available for this report.", 120);
+                            } else if let Some(financials) =
+                                selected_nasdaq_financials(data, app.stock.report_frequency)
+                            {
+                                if financials
+                                    .periods
+                                    .get(app.stock.company_report_selected)
+                                    .is_some()
+                                {
+                                    app.stock.company_report_modal = Some(CompanyReportModal {
+                                        period_index: app.stock.company_report_selected,
+                                        statement: CompanyReportStatement::IncomeStatement,
+                                        scroll: 0,
+                                    });
+                                } else {
+                                    app.set_status("No report data available.", 120);
                                 }
                             }
+                        }
+                        // ── Company reports panel: toggle Q/A (NASDAQ) ────
+                        (StockState::Loaded(data), KeyCode::Char('t'), _)
+                            if app.stock.active_tab == financials_tab
+                                && app.stock.financials_in_reports
+                                && can_toggle_nasdaq(data) =>
+                        {
+                            app.stock.report_frequency = app.stock.report_frequency.toggle();
+                            let len = company_reports_len(data, app.stock.report_frequency);
+                            app.stock.company_report_selected = 0;
+                            app.stock.clamp_company_report_selection(len);
+                            app.stock.company_report_modal = None;
                         }
                         // ── Indicator grid navigation ─────────────────────
                         (StockState::Loaded(data), KeyCode::Char('h'), _)
@@ -560,7 +624,8 @@ async fn run(
                             tokio::spawn(async move {
                                 let client = reqwest::Client::new();
                                 let news = if is_brazil {
-                                    fundamentus::fetch_fatos_relevantes(&client, &ticker).await
+                                    sources::fundamentus::fetch_fatos_relevantes(&client, &ticker)
+                                        .await
                                 } else {
                                     news::fetch_yahoo_news_for_ticker(&client, &ticker).await
                                 };
@@ -592,6 +657,8 @@ async fn run(
                             app.stock.active_tab = 0;
                             app.stock.financials_modal = None;
                             app.stock.financials_in_reports = false;
+                            app.stock.company_report_modal = None;
+                            app.stock.cvm_report = CvmReportState::Idle;
                         }
                         (StockState::Loaded(_), KeyCode::Char('f'), _)
                             if app.stock.active_tab != ai_tab =>
@@ -599,12 +666,17 @@ async fn run(
                             app.stock.active_tab = 1;
                             app.stock.financials_modal = None;
                             app.stock.financials_in_reports = false;
+                            app.stock.company_report_modal = None;
+                            app.stock.cvm_report = CvmReportState::Idle;
                         }
                         (StockState::Loaded(_), KeyCode::Char('v' | 'd' | 'e' | 'p' | 'g'), _)
                             if app.stock.active_tab != ai_tab =>
                         {
                             app.stock.active_tab = 1;
                             app.stock.financials_modal = None;
+                            app.stock.financials_in_reports = false;
+                            app.stock.company_report_modal = None;
+                            app.stock.cvm_report = CvmReportState::Idle;
                         }
                         _ => {}
                     },
@@ -780,6 +852,27 @@ async fn run(
                         app.stock.financials_selected =
                             clamp_selection(app.stock.financials_selected, &sections);
                         app.stock.financials_modal = None;
+                        app.stock.financials_in_reports = false;
+                        app.stock.company_report_selected = 0;
+                        app.stock.report_frequency = if data
+                            .nasdaq_financials_quarterly
+                            .as_ref()
+                            .map(|f| !f.periods.is_empty())
+                            .unwrap_or(false)
+                        {
+                            ReportFrequency::Quarterly
+                        } else if data
+                            .nasdaq_financials_annual
+                            .as_ref()
+                            .map(|f| !f.periods.is_empty())
+                            .unwrap_or(false)
+                        {
+                            ReportFrequency::Annual
+                        } else {
+                            ReportFrequency::Quarterly
+                        };
+                        app.stock.company_report_modal = None;
+                        app.stock.cvm_report = CvmReportState::Idle;
                         app.stock.state = StockState::Loaded(Box::new(data));
                         app.stock.news_selected = 0;
                     }
@@ -1199,6 +1292,63 @@ fn chat_max_scroll(
     }
     let lines = chat_line_count(chat_messages, chat_state, ai_enabled);
     lines.saturating_sub(height)
+}
+
+fn company_reports_len(data: &models::StockIndicators, frequency: ReportFrequency) -> usize {
+    if let Some(reports) = data.quarterly_reports.as_ref() {
+        return reports.len();
+    }
+    match frequency {
+        ReportFrequency::Quarterly => data
+            .nasdaq_financials_quarterly
+            .as_ref()
+            .map(|f| f.periods.len())
+            .unwrap_or(0),
+        ReportFrequency::Annual => data
+            .nasdaq_financials_annual
+            .as_ref()
+            .map(|f| f.periods.len())
+            .unwrap_or(0),
+    }
+}
+
+fn can_toggle_nasdaq(data: &models::StockIndicators) -> bool {
+    let has_quarterly = data
+        .nasdaq_financials_quarterly
+        .as_ref()
+        .map(|f| !f.periods.is_empty())
+        .unwrap_or(false);
+    let has_annual = data
+        .nasdaq_financials_annual
+        .as_ref()
+        .map(|f| !f.periods.is_empty())
+        .unwrap_or(false);
+    has_quarterly && has_annual
+}
+
+fn selected_nasdaq_financials<'a>(
+    data: &'a models::StockIndicators,
+    frequency: ReportFrequency,
+) -> Option<&'a models::NasdaqFinancials> {
+    match frequency {
+        ReportFrequency::Quarterly => data.nasdaq_financials_quarterly.as_ref(),
+        ReportFrequency::Annual => data.nasdaq_financials_annual.as_ref(),
+    }
+}
+
+fn company_report_rows_len(
+    data: &models::StockIndicators,
+    frequency: ReportFrequency,
+    statement: CompanyReportStatement,
+) -> usize {
+    let Some(financials) = selected_nasdaq_financials(data, frequency) else {
+        return 0;
+    };
+    match statement {
+        CompanyReportStatement::IncomeStatement => financials.income_statement.rows.len(),
+        CompanyReportStatement::BalanceSheet => financials.balance_sheet.rows.len(),
+        CompanyReportStatement::CashFlow => financials.cash_flow.rows.len(),
+    }
 }
 
 /// Number of lines to scroll per PageUp / PageDown in the CVM report viewer.

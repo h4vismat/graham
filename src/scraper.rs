@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::models::*;
-use crate::{fundamentus, news, profile};
+use crate::{news, profile, sources::fundamentus, sources::nasdaq};
 
 // ─── Internal JSON types ──────────────────────────────────────────────────────
 
@@ -180,8 +180,16 @@ fn merge_and_sort_news(
         return None;
     }
     combined.sort_by(|x, y| {
-        let kx = x.published_at.as_deref().map(date_sort_key).unwrap_or_default();
-        let ky = y.published_at.as_deref().map(date_sort_key).unwrap_or_default();
+        let kx = x
+            .published_at
+            .as_deref()
+            .map(date_sort_key)
+            .unwrap_or_default();
+        let ky = y
+            .published_at
+            .as_deref()
+            .map(date_sort_key)
+            .unwrap_or_default();
         ky.cmp(&kx) // descending
     });
     combined.truncate(50);
@@ -398,8 +406,18 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
     let yahoo_client = client.clone();
     let profile_client = client.clone();
     let reports_client = client.clone();
+    let nasdaq_client = client.clone();
     let is_brazil = matches!(market, Market::Brazil);
-    let (price_history, fatos_news, yahoo_news, profile, quarterly_reports) = tokio::join!(
+    let is_usa = matches!(market, Market::Usa);
+    let (
+        price_history,
+        fatos_news,
+        yahoo_news,
+        profile,
+        quarterly_reports,
+        nasdaq_quarterly,
+        nasdaq_annual,
+    ) = tokio::join!(
         fetch_price_period(&price_client, &price_base, ticker, &page_url, 4),
         async {
             if is_brazil {
@@ -413,6 +431,22 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
         async {
             if is_brazil {
                 fundamentus::fetch_quarterly_reports(&reports_client, ticker).await
+            } else {
+                None
+            }
+        },
+        async {
+            if is_usa {
+                nasdaq::fetch_financials(&nasdaq_client, ticker, nasdaq::NasdaqFrequency::Quarterly)
+                    .await
+            } else {
+                None
+            }
+        },
+        async {
+            if is_usa {
+                nasdaq::fetch_financials(&nasdaq_client, ticker, nasdaq::NasdaqFrequency::Annual)
+                    .await
             } else {
                 None
             }
@@ -473,6 +507,8 @@ pub async fn scrape_stock(ticker: &str) -> Result<StockIndicators, Box<dyn std::
         news,
         profile,
         quarterly_reports,
+        nasdaq_financials_quarterly: nasdaq_quarterly,
+        nasdaq_financials_annual: nasdaq_annual,
     })
 }
 
@@ -502,9 +538,8 @@ pub async fn fetch_current_price(
         .await?;
 
     let html = Html::parse_document(&html_text);
-    let price_text = select_text(&html, "div.info.special strong.value").ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Price not found")
-    })?;
+    let price_text = select_text(&html, "div.info.special strong.value")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Price not found"))?;
     let current_price = parse_br_number(&price_text);
     if current_price <= 0.0 {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "Price invalid").into());

@@ -2,7 +2,7 @@ use reqwest::Client;
 use rss::Channel;
 
 use crate::models::NewsItem;
-use crate::yahoo::yahoo_symbols_for_ticker;
+use crate::sources::yahoo::yahoo_symbols_for_ticker;
 
 const YAHOO_RSS_TEMPLATE: &str =
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US";
@@ -27,7 +27,10 @@ async fn fetch_symbol_news(client: &Client, symbol: &str) -> Option<Vec<NewsItem
     let url = YAHOO_RSS_TEMPLATE.replace("{symbol}", symbol);
     let resp = client
         .get(url)
-        .header("Accept", "application/rss+xml, application/xml;q=0.9, */*;q=0.8")
+        .header(
+            "Accept",
+            "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+        )
         .send()
         .await
         .ok()?;
@@ -59,7 +62,11 @@ fn news_item_from_rss(item: &rss::Item) -> Option<NewsItem> {
     // Strip HTML tags from the RSS description if present.
     let description = item.description().and_then(|d| {
         let stripped = strip_html(d.trim());
-        if stripped.is_empty() { None } else { Some(stripped) }
+        if stripped.is_empty() {
+            None
+        } else {
+            Some(stripped)
+        }
     });
 
     Some(NewsItem {
@@ -90,9 +97,8 @@ fn is_filtered(item: &rss::Item, title: &str, link: &str) -> bool {
     let description = item.description().unwrap_or("");
     let source = item.source().and_then(|s| s.title()).unwrap_or("");
 
-    let mut haystack = String::with_capacity(
-        title.len() + link.len() + description.len() + source.len() + 3,
-    );
+    let mut haystack =
+        String::with_capacity(title.len() + link.len() + description.len() + source.len() + 3);
     haystack.push_str(title);
     haystack.push(' ');
     haystack.push_str(link);

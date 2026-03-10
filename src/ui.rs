@@ -11,8 +11,9 @@ use ratatui::{
 };
 
 use crate::app::{
-    AiState, App, ChatMessage, ChatRole, ChatState, CvmReportState, HistoryForm, HistoryMode,
-    MenuMode, PERIODS, Screen, StockState, TABS,
+    AiState, App, ChatMessage, ChatRole, ChatState, CompanyReportModal, CompanyReportStatement,
+    CvmReportState, HistoryForm, HistoryMode, MenuMode, PERIODS, ReportFrequency, Screen,
+    StockState, TABS,
 };
 use crate::financials::{self, FinancialSelection};
 use crate::models::{IndicatorData, StockIndicators};
@@ -121,9 +122,37 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 }
                 _ => {}
             }
+            if app.stock.company_report_modal.is_some() {
+                return f.render_widget(
+                    Paragraph::new(
+                        " ← → / Tab  switch statement  |  ↑ ↓ / PgUp PgDn  scroll  |  Esc / q  close  |  Ctrl+C quit",
+                    )
+                    .style(Style::default().fg(C_DIM)),
+                    area,
+                );
+            }
             let is_news = app.stock.active_tab == news_tab;
             let is_financials = app.stock.active_tab == financials_tab;
             let is_ai = app.stock.active_tab == ai_tab;
+            let (has_reports, can_toggle) = match &app.stock.state {
+                StockState::Loaded(data) => {
+                    let has_quarterly = data
+                        .nasdaq_financials_quarterly
+                        .as_ref()
+                        .map(|f| !f.periods.is_empty())
+                        .unwrap_or(false);
+                    let has_annual = data
+                        .nasdaq_financials_annual
+                        .as_ref()
+                        .map(|f| !f.periods.is_empty())
+                        .unwrap_or(false);
+                    (
+                        company_reports_view(data, app.stock.report_frequency).is_some(),
+                        has_quarterly && has_annual,
+                    )
+                }
+                _ => (false, false),
+            };
             match (&app.stock.state, app.stock.active_tab) {
                 (StockState::Input, _) => " Enter ticker and press ↵  |  Esc menu  |  Ctrl+C quit",
                 (StockState::Loading(_), _) => " Loading…  |  Ctrl+C quit",
@@ -134,9 +163,17 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
                     if app.stock.financials_modal.is_some() {
                         " Enter / Esc close  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
                     } else if app.stock.financials_in_reports {
-                        " j/k ↑↓ move  |  Enter open  |  Esc indicators  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        if can_toggle {
+                            " j/k ↑↓ move  |  Enter open  |  t toggle Q/A  |  Esc indicators  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        } else {
+                            " j/k ↑↓ move  |  Enter open  |  Esc indicators  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        }
                     } else {
-                        " h j k l  move  |  Enter open  |  c CVM reports  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        if has_reports {
+                            " h j k l  move  |  Enter open  |  c Company reports  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        } else {
+                            " h j k l  move  |  Enter open  |  o f a n  jump tab  |  q / Esc back  |  Ctrl+C quit"
+                        }
                     }
                 }
                 (StockState::Loaded(_), _) if is_ai => {
@@ -188,7 +225,15 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
                     app.stock.financials_selected,
                     app.stock.financials_modal,
                     app.stock.financials_in_reports,
-                    app.stock.quarterly_report_selected,
+                    app.stock.company_report_selected,
+                    app.stock.report_frequency,
+                );
+                render_company_report_modal(
+                    f,
+                    area,
+                    data,
+                    app.stock.report_frequency,
+                    &app.stock.company_report_modal,
                 );
                 // CVM report viewer drawn on top of everything else.
                 render_cvm_report_overlay(f, area, &app.stock.cvm_report, app.tick);
@@ -671,7 +716,8 @@ fn render_loaded(
     financials_selected: FinancialSelection,
     financials_modal: Option<FinancialSelection>,
     financials_in_reports: bool,
-    quarterly_report_selected: usize,
+    company_report_selected: usize,
+    report_frequency: ReportFrequency,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -714,7 +760,8 @@ fn render_loaded(
             data,
             financials_selected,
             financials_in_reports,
-            quarterly_report_selected,
+            company_report_selected,
+            report_frequency,
         ),
         tab if tab == ai_tab => render_ai_tab(
             f,
@@ -1012,13 +1059,40 @@ fn format_chat_lines(chat_messages: &[ChatMessage]) -> Vec<Line<'_>> {
 
 // ─── Financials tab ──────────────────────────────────────────────────────────
 
+enum CompanyReportView<'a> {
+    Cvm(&'a [crate::models::QuarterlyReport]),
+    Nasdaq(&'a crate::models::NasdaqFinancials),
+}
+
+fn company_reports_view(
+    data: &StockIndicators,
+    report_frequency: ReportFrequency,
+) -> Option<CompanyReportView<'_>> {
+    if let Some(reports) = data.quarterly_reports.as_deref() {
+        if !reports.is_empty() {
+            return Some(CompanyReportView::Cvm(reports));
+        }
+    }
+
+    let nasdaq = match report_frequency {
+        ReportFrequency::Quarterly => data.nasdaq_financials_quarterly.as_ref(),
+        ReportFrequency::Annual => data.nasdaq_financials_annual.as_ref(),
+    }?;
+    if nasdaq.periods.is_empty() {
+        None
+    } else {
+        Some(CompanyReportView::Nasdaq(nasdaq))
+    }
+}
+
 fn render_financials(
     f: &mut Frame,
     area: Rect,
     data: &StockIndicators,
     selection: FinancialSelection,
     in_reports: bool,
-    quarterly_selected: usize,
+    company_report_selected: usize,
+    report_frequency: ReportFrequency,
 ) {
     let sections = financials::sections(data);
     let selection = financials::clamp_selection(selection, &sections);
@@ -1086,10 +1160,10 @@ fn render_financials(
         },
     );
 
-    // Bottom row: Growth always on the left; for Brazilian stocks also show
-    // the CVM quarterly-reports panel on the right.
-    match data.quarterly_reports.as_deref() {
-        Some(reports) if !reports.is_empty() => {
+    // Bottom row: Growth always on the left; if company reports exist, show
+    // the Company Reports panel on the right.
+    match company_reports_view(data, report_frequency) {
+        Some(CompanyReportView::Cvm(reports)) => {
             let bottom = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -1105,9 +1179,44 @@ fn render_financials(
                     None
                 },
             );
-            render_quarterly_reports(f, bottom[1], reports, quarterly_selected, in_reports);
+            let periods: Vec<&str> = reports.iter().map(|r| r.period.as_str()).collect();
+            render_company_reports(
+                f,
+                bottom[1],
+                " Company Reports ",
+                &periods,
+                company_report_selected,
+                in_reports,
+            );
         }
-        _ => {
+        Some(CompanyReportView::Nasdaq(financials)) => {
+            let bottom = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[2]);
+            render_indicator_table(
+                f,
+                bottom[0],
+                sections.get(4).map(|s| s.title).unwrap_or("Growth"),
+                sections.get(4).map(|s| s.rows.as_slice()).unwrap_or(&[]),
+                if !in_reports && selection.section == 4 {
+                    Some(selection.row)
+                } else {
+                    None
+                },
+            );
+            let title = format!(" Company Reports — {} ", report_frequency.label());
+            let periods: Vec<&str> = financials.periods.iter().map(String::as_str).collect();
+            render_company_reports(
+                f,
+                bottom[1],
+                title.as_str(),
+                &periods,
+                company_report_selected,
+                in_reports,
+            );
+        }
+        None => {
             render_indicator_table(
                 f,
                 rows[2],
@@ -1123,10 +1232,11 @@ fn render_financials(
     }
 }
 
-fn render_quarterly_reports(
+fn render_company_reports(
     f: &mut Frame,
     area: Rect,
-    reports: &[crate::models::QuarterlyReport],
+    title: &str,
+    periods: &[&str],
     selected: usize,
     focused: bool,
 ) {
@@ -1139,19 +1249,19 @@ fn render_quarterly_reports(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(
-            " CVM Reports ",
+            title,
             Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
         ));
 
-    let clamped_selected = selected.min(reports.len().saturating_sub(1));
+    let clamped_selected = selected.min(periods.len().saturating_sub(1));
 
-    let list_items: Vec<ListItem> = reports
+    let list_items: Vec<ListItem> = periods
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let is_selected = focused && i == clamped_selected;
             let mut item_lines = vec![Line::from(Span::styled(
-                r.period.as_str(),
+                *r,
                 Style::default().fg(C_LABEL).add_modifier(Modifier::BOLD),
             ))];
             if is_selected {
@@ -1245,6 +1355,102 @@ fn render_cvm_report_overlay(f: &mut Frame, area: Rect, state: &CvmReportState, 
             render_cvm_table(f, inner, rows, *scroll);
         }
     }
+}
+
+// ─── NASDAQ company report modal ──────────────────────────────────────────────
+
+fn render_company_report_modal(
+    f: &mut Frame,
+    area: Rect,
+    data: &StockIndicators,
+    report_frequency: ReportFrequency,
+    modal: &Option<CompanyReportModal>,
+) {
+    let Some(modal) = modal else {
+        return;
+    };
+    let financials = match report_frequency {
+        ReportFrequency::Quarterly => data.nasdaq_financials_quarterly.as_ref(),
+        ReportFrequency::Annual => data.nasdaq_financials_annual.as_ref(),
+    };
+    let Some(financials) = financials else {
+        return;
+    };
+
+    let period = financials
+        .periods
+        .get(modal.period_index)
+        .map(String::as_str)
+        .unwrap_or("Period");
+    let title = format!(
+        " Company Report — {period} ({}) ",
+        report_frequency.label()
+    );
+    let modal_area = centered_rect(95, 92, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_TAB))
+        .title(Span::styled(
+            title,
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ));
+
+    f.render_widget(Clear, modal_area);
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(inner);
+
+    let titles = [
+        CompanyReportStatement::IncomeStatement,
+        CompanyReportStatement::BalanceSheet,
+        CompanyReportStatement::CashFlow,
+    ]
+    .iter()
+    .map(|statement| {
+        Line::from(Span::styled(
+            statement.label(),
+            Style::default().fg(C_LABEL),
+        ))
+    })
+    .collect::<Vec<_>>();
+    let selected = match modal.statement {
+        CompanyReportStatement::IncomeStatement => 0,
+        CompanyReportStatement::BalanceSheet => 1,
+        CompanyReportStatement::CashFlow => 2,
+    };
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .highlight_style(Style::default().fg(C_TAB).add_modifier(Modifier::BOLD))
+        .divider(Span::styled(" | ", Style::default().fg(C_DIM)));
+    f.render_widget(tabs, chunks[0]);
+
+    let rows = match modal.statement {
+        CompanyReportStatement::IncomeStatement => &financials.income_statement.rows,
+        CompanyReportStatement::BalanceSheet => &financials.balance_sheet.rows,
+        CompanyReportStatement::CashFlow => &financials.cash_flow.rows,
+    };
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("No data available.")
+                .style(Style::default().fg(C_DIM))
+                .alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    render_nasdaq_table(
+        f,
+        chunks[1],
+        rows,
+        modal.period_index,
+        modal.scroll,
+        period,
+    );
 }
 
 /// Render structured CVM rows as a ratatui Table with dynamic column widths.
@@ -1358,15 +1564,115 @@ fn render_cvm_table(f: &mut Frame, area: Rect, rows: &[Vec<String>], scroll: usi
     f.render_widget(table, area);
 }
 
+fn render_nasdaq_table(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[crate::models::NasdaqStatementRow],
+    period_index: usize,
+    scroll: usize,
+    period_label: &str,
+) {
+    if rows.is_empty() || area.height == 0 {
+        return;
+    }
+
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    if visible_rows == 0 {
+        return;
+    }
+    let max_scroll = rows.len().saturating_sub(visible_rows);
+    let offset = scroll.min(max_scroll);
+
+    let mut table_rows = Vec::with_capacity(visible_rows + 1);
+    table_rows.push(
+        Row::new(vec![
+            Cell::from("Item").style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Cell::from(period_label)
+                .style(Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+        ])
+        .style(Style::default().bg(Color::Reset)),
+    );
+
+    for row in rows.iter().skip(offset).take(visible_rows) {
+        let value = row
+            .values
+            .get(period_index)
+            .map(String::as_str)
+            .unwrap_or("-");
+        let cells = vec![
+            Cell::from(row.label.as_str()).style(Style::default().fg(C_LABEL)),
+            Cell::from(value).style(value_color(value)),
+        ];
+        table_rows.push(Row::new(cells));
+    }
+
+    let table = Table::new(
+        table_rows,
+        [Constraint::Percentage(70), Constraint::Percentage(30)],
+    )
+    .column_spacing(1)
+    .style(Style::default().fg(C_LABEL));
+
+    f.render_widget(table, area);
+}
+
 /// Pick a colour for a numeric value cell: green for positive, red for
 /// negative, dim for zero / empty / non-numeric.
 fn value_color(s: &str) -> Style {
-    let trimmed = s.trim().replace('.', "").replace(',', ".");
-    match trimmed.parse::<f64>() {
-        Ok(v) if v > 0.0 => Style::default().fg(C_POS),
-        Ok(v) if v < 0.0 => Style::default().fg(C_NEG),
+    match parse_numeric_value(s) {
+        Some(v) if v > 0.0 => Style::default().fg(C_POS),
+        Some(v) if v < 0.0 => Style::default().fg(C_NEG),
         _ => Style::default().fg(C_DIM),
     }
+}
+
+fn parse_numeric_value(s: &str) -> Option<f64> {
+    let raw = s.trim();
+    if raw.is_empty() || raw == "--" || raw == "-" {
+        return None;
+    }
+
+    let mut negative = false;
+    let mut cleaned = raw.to_string();
+    if cleaned.starts_with('(') && cleaned.ends_with(')') {
+        negative = true;
+        cleaned = cleaned.trim_start_matches('(').trim_end_matches(')').to_string();
+    }
+    if cleaned.starts_with('-') {
+        negative = true;
+        cleaned = cleaned.trim_start_matches('-').trim().to_string();
+    }
+
+    cleaned = cleaned
+        .replace("R$", "")
+        .replace('$', "")
+        .replace('%', "")
+        .replace(' ', "");
+
+    let numeric = if cleaned.contains(',') && cleaned.contains('.') {
+        let last_comma = cleaned.rfind(',').unwrap_or(0);
+        let last_dot = cleaned.rfind('.').unwrap_or(0);
+        if last_comma > last_dot {
+            // Brazilian-style: 1.234,56
+            cleaned.replace('.', "").replace(',', ".")
+        } else {
+            // US-style: 1,234.56
+            cleaned.replace(',', "")
+        }
+    } else if cleaned.contains(',') {
+        // Could be "1,23" or "1,234" — assume decimal when short tail
+        let parts: Vec<&str> = cleaned.split(',').collect();
+        if parts.last().map_or(0, |p| p.len()) <= 2 {
+            cleaned.replace(',', ".")
+        } else {
+            cleaned.replace(',', "")
+        }
+    } else {
+        cleaned
+    };
+
+    let parsed = numeric.parse::<f64>().ok()?;
+    Some(if negative { -parsed } else { parsed })
 }
 
 // ─── News tab ────────────────────────────────────────────────────────────────

@@ -57,7 +57,7 @@ pub async fn fetch_fatos_relevantes(client: &Client, ticker: &str) -> Option<Vec
 
                 // Extract text cells (columns after the date), ignoring pure
                 // link cells whose only text is "Exibir" / "Ver" / etc.
-                let mut text_cols: Vec<String> = tds[1..]
+                let text_cols: Vec<String> = tds[1..]
                     .iter()
                     .filter_map(|td| {
                         let t = td.text().collect::<String>().trim().to_string();
@@ -203,14 +203,22 @@ pub async fn fetch_quarterly_reports(
                     Some(href) => href,
                     None => String::new(),
                 };
-                QuarterlyReport { period, published, link }
+                QuarterlyReport {
+                    period,
+                    published,
+                    link,
+                }
             }
         })
         .collect();
 
     let reports = futures::future::join_all(futures).await;
 
-    if reports.is_empty() { None } else { Some(reports) }
+    if reports.is_empty() {
+        None
+    } else {
+        Some(reports)
+    }
 }
 
 // ─── In-app report viewer ─────────────────────────────────────────────────────
@@ -294,7 +302,9 @@ pub async fn fetch_cvm_report(_client: &Client, url: &str) -> Option<Vec<Vec<Str
     };
 
     if rows.is_empty() {
-        Some(vec![vec!["No financial data found in this report.".to_string()]])
+        Some(vec![vec![
+            "No financial data found in this report.".to_string(),
+        ]])
     } else {
         Some(rows)
     }
@@ -310,8 +320,12 @@ fn extract_dados_table(html: &Html) -> Vec<Vec<String>> {
     let Ok(table_sel) = Selector::parse("#ctl00_cphPopUp_tbDados") else {
         return vec![];
     };
-    let Ok(tr_sel) = Selector::parse("tr") else { return vec![] };
-    let Ok(cell_sel) = Selector::parse("td, th") else { return vec![] };
+    let Ok(tr_sel) = Selector::parse("tr") else {
+        return vec![];
+    };
+    let Ok(cell_sel) = Selector::parse("td, th") else {
+        return vec![];
+    };
 
     let Some(table) = html.select(&table_sel).next() else {
         return vec![];
@@ -501,7 +515,10 @@ mod tests {
         let html = Html::parse_document(html_str);
         let rows = extract_dados_table(&html);
         // Section header row has exactly one element.
-        assert!(rows.iter().any(|r| r.len() == 1 && r[0] == "Demonstração do Resultado"));
+        assert!(
+            rows.iter()
+                .any(|r| r.len() == 1 && r[0] == "Demonstração do Resultado")
+        );
         // Data row contains the account code.
         assert!(rows.iter().any(|r| r.len() > 1 && r[0] == "3.01"));
     }

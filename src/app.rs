@@ -44,6 +44,68 @@ pub enum CvmReportState {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportFrequency {
+    Quarterly,
+    Annual,
+}
+
+impl ReportFrequency {
+    pub fn toggle(self) -> Self {
+        match self {
+            ReportFrequency::Quarterly => ReportFrequency::Annual,
+            ReportFrequency::Annual => ReportFrequency::Quarterly,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReportFrequency::Quarterly => "Quarterly",
+            ReportFrequency::Annual => "Annual",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompanyReportStatement {
+    IncomeStatement,
+    BalanceSheet,
+    CashFlow,
+}
+
+impl CompanyReportStatement {
+    pub fn next(self) -> Self {
+        match self {
+            CompanyReportStatement::IncomeStatement => CompanyReportStatement::BalanceSheet,
+            CompanyReportStatement::BalanceSheet => CompanyReportStatement::CashFlow,
+            CompanyReportStatement::CashFlow => CompanyReportStatement::IncomeStatement,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            CompanyReportStatement::IncomeStatement => CompanyReportStatement::CashFlow,
+            CompanyReportStatement::BalanceSheet => CompanyReportStatement::IncomeStatement,
+            CompanyReportStatement::CashFlow => CompanyReportStatement::BalanceSheet,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CompanyReportStatement::IncomeStatement => "Income",
+            CompanyReportStatement::BalanceSheet => "Balance",
+            CompanyReportStatement::CashFlow => "Cash Flow",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CompanyReportModal {
+    pub period_index: usize,
+    pub statement: CompanyReportStatement,
+    pub scroll: usize,
+}
+
 pub enum AiState {
     Unavailable,
     Loading,
@@ -82,10 +144,14 @@ pub struct StockScreen {
     pub news_selected: usize,
     pub financials_selected: FinancialSelection,
     pub financials_modal: Option<FinancialSelection>,
-    /// Whether keyboard focus is on the CVM quarterly-reports panel (Brazil only).
+    /// Whether keyboard focus is on the Company Reports panel.
     pub financials_in_reports: bool,
-    /// Currently selected quarterly report row in the CVM reports panel.
-    pub quarterly_report_selected: usize,
+    /// Currently selected report row in the Company Reports panel.
+    pub company_report_selected: usize,
+    /// Quarterly vs. annual company reports (NASDAQ).
+    pub report_frequency: ReportFrequency,
+    /// NASDAQ company report modal state.
+    pub company_report_modal: Option<CompanyReportModal>,
     /// State of the in-app CVM report viewer overlay.
     pub cvm_report: CvmReportState,
 }
@@ -192,7 +258,9 @@ impl StockScreen {
             financials_selected: FinancialSelection::new(0, 0),
             financials_modal: None,
             financials_in_reports: false,
-            quarterly_report_selected: 0,
+            company_report_selected: 0,
+            report_frequency: ReportFrequency::Quarterly,
+            company_report_modal: None,
             cvm_report: CvmReportState::Idle,
         }
     }
@@ -200,11 +268,17 @@ impl StockScreen {
     pub fn next_tab(&mut self) {
         self.active_tab = (self.active_tab + 1) % TABS.len();
         self.financials_modal = None;
+        self.financials_in_reports = false;
+        self.company_report_modal = None;
+        self.cvm_report = CvmReportState::Idle;
     }
 
     pub fn prev_tab(&mut self) {
         self.active_tab = (self.active_tab + TABS.len() - 1) % TABS.len();
         self.financials_modal = None;
+        self.financials_in_reports = false;
+        self.company_report_modal = None;
+        self.cvm_report = CvmReportState::Idle;
     }
 
     pub fn next_period(&mut self) {
@@ -228,30 +302,32 @@ impl StockScreen {
         self.financials_selected = FinancialSelection::new(0, 0);
         self.financials_modal = None;
         self.financials_in_reports = false;
-        self.quarterly_report_selected = 0;
+        self.company_report_selected = 0;
+        self.report_frequency = ReportFrequency::Quarterly;
+        self.company_report_modal = None;
         self.cvm_report = CvmReportState::Idle;
     }
 
-    pub fn clamp_quarterly_selection(&mut self, len: usize) {
+    pub fn clamp_company_report_selection(&mut self, len: usize) {
         if len == 0 {
-            self.quarterly_report_selected = 0;
-        } else if self.quarterly_report_selected >= len {
-            self.quarterly_report_selected = len - 1;
+            self.company_report_selected = 0;
+        } else if self.company_report_selected >= len {
+            self.company_report_selected = len - 1;
         }
     }
 
-    pub fn next_quarterly(&mut self, len: usize) {
+    pub fn next_company_report(&mut self, len: usize) {
         if len == 0 {
             return;
         }
-        self.quarterly_report_selected = (self.quarterly_report_selected + 1).min(len - 1);
+        self.company_report_selected = (self.company_report_selected + 1).min(len - 1);
     }
 
-    pub fn prev_quarterly(&mut self, len: usize) {
+    pub fn prev_company_report(&mut self, len: usize) {
         if len == 0 {
             return;
         }
-        self.quarterly_report_selected = self.quarterly_report_selected.saturating_sub(1);
+        self.company_report_selected = self.company_report_selected.saturating_sub(1);
     }
 
     pub fn clamp_news_selection(&mut self, len: usize) {

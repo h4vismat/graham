@@ -29,6 +29,25 @@ pub struct QuarterlyReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NasdaqStatementRow {
+    pub label: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NasdaqStatementTable {
+    pub rows: Vec<NasdaqStatementRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NasdaqFinancials {
+    pub periods: Vec<String>,
+    pub income_statement: NasdaqStatementTable,
+    pub balance_sheet: NasdaqStatementTable,
+    pub cash_flow: NasdaqStatementTable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompanyProfile {
     pub description: String,
     pub sector: Option<String>,
@@ -129,4 +148,10 @@ pub struct StockIndicators {
     /// Only populated for Brazilian (B3) tickers.
     #[serde(skip_serializing)]
     pub quarterly_reports: Option<Vec<QuarterlyReport>>,
+    /// NASDAQ financial statements (quarterly).
+    #[serde(skip_serializing)]
+    pub nasdaq_financials_quarterly: Option<NasdaqFinancials>,
+    /// NASDAQ financial statements (annual).
+    #[serde(skip_serializing)]
+    pub nasdaq_financials_annual: Option<NasdaqFinancials>,
 }

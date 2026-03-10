@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::CompanyProfile;
-use crate::yahoo::yahoo_symbols_for_ticker;
+use crate::sources::yahoo::yahoo_symbols_for_ticker;
 
 const YAHOO_PROFILE_PAGE_TEMPLATE: &str = "https://finance.yahoo.com/quote/{symbol}/profile/";
 
@@ -37,10 +37,7 @@ struct AssetProfile {
     industry: Option<String>,
 }
 
-pub async fn fetch_profile_for_ticker(
-    client: &Client,
-    ticker: &str,
-) -> Option<CompanyProfile> {
+pub async fn fetch_profile_for_ticker(client: &Client, ticker: &str) -> Option<CompanyProfile> {
     let symbols = yahoo_symbols_for_ticker(ticker);
     for symbol in symbols {
         if let Some(profile) = fetch_profile_for_symbol(client, &symbol).await {
@@ -50,10 +47,7 @@ pub async fn fetch_profile_for_ticker(
     None
 }
 
-async fn fetch_profile_for_symbol(
-    client: &Client,
-    symbol: &str,
-) -> Option<CompanyProfile> {
+async fn fetch_profile_for_symbol(client: &Client, symbol: &str) -> Option<CompanyProfile> {
     if let Some(profile) = fetch_profile_from_html(client, symbol).await {
         return Some(profile);
     }
@@ -99,10 +93,7 @@ fn parse_profile(text: &str) -> Option<CompanyProfile> {
     profile_to_company(profile)
 }
 
-async fn fetch_profile_from_html(
-    client: &Client,
-    symbol: &str,
-) -> Option<CompanyProfile> {
+async fn fetch_profile_from_html(client: &Client, symbol: &str) -> Option<CompanyProfile> {
     let url = YAHOO_PROFILE_PAGE_TEMPLATE.replace("{symbol}", symbol);
     let resp = client
         .get(url)
@@ -112,7 +103,10 @@ async fn fetch_profile_from_html(
              AppleWebKit/537.36 (KHTML, like Gecko) \
              Chrome/121.0.0.0 Safari/537.36",
         )
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
