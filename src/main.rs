@@ -7,7 +7,6 @@ mod news;
 mod profile;
 mod scraper;
 mod sources;
-mod stocks;
 mod ui;
 
 use std::io;
@@ -55,7 +54,8 @@ enum FormAction {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = history::init_db().await?;
-    stocks::sec::migrate_sec_tables(&db).await?;
+    sources::sec::migrate_sec_tables(&db).await?;
+    sources::sec::sync_sec_companies(&db).await?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
